@@ -17,8 +17,8 @@ Extracts the package, runs 15 analyzers, and reports security findings with a we
 ### Homebrew (macOS & Linux)
 
 ```sh
-brew install mlab-sh/apex/apex
-# or: brew tap mlab-sh/apex && brew install apex
+brew tap mlab-sh/apex https://github.com/mlab-sh/apex.git
+brew install apex
 ```
 
 ### Prebuilt binaries
