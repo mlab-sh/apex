@@ -112,7 +112,60 @@ pub struct Finding {
     pub line: Option<u64>,
     pub cwe: Option<String>,
     pub masvs: Option<String>,
+    /// MITRE ATT&CK for Mobile technique ID (e.g. `T1638`, `T1406.002`).
+    /// Auto-populated from the finding id via [`default_mitre`] and overridable
+    /// with [`Finding::mitre`], so SOCs can pivot findings into ATT&CK.
+    pub mitre: Option<String>,
     pub metadata: Map<String, Value>,
+}
+
+/// Default MITRE ATT&CK for Mobile technique for a finding id.
+///
+/// Kept as one auditable table rather than sprinkled across analyzers. Only
+/// findings whose described capability maps to a genuine adversary technique
+/// are tagged — control weaknesses with no clean ATT&CK equivalent (weak
+/// crypto, cert config, debuggable flags) intentionally return `None`. IDs are
+/// from ATT&CK for Mobile (verified against attack.mitre.org).
+pub fn default_mitre(id: &str) -> Option<&'static str> {
+    let technique = match id {
+        // Network interception → Adversary-in-the-Middle. Cleartext traffic,
+        // trusting user/custom CAs, and absent/bypassed pinning all enable MitM.
+        "NSC_CLEARTEXT_GLOBAL"
+        | "NSC_CLEARTEXT_DOMAIN"
+        | "NSC_TRUST_USER_CERTS"
+        | "NSC_DEBUG_USER_CERTS"
+        | "NSC_DEBUG_OVERRIDES"
+        | "NSC_NO_PINNING"
+        | "NET_PINNING_BYPASS"
+        | "SAST_SSL_INSECURE"
+        | "SAST_WEBVIEW_SSL_BYPASS"
+        | "SAST_SELF_SIGNED_CERT" => "T1638",
+
+        // Anti-analysis → Obfuscated Files or Information (packing is .002).
+        "ADV_PACKER_DETECTED" => "T1406.002",
+        "ADV_STRING_ENCRYPTION" | "ADV_OBFUSCATION_SCORE" | "SAST_DEXGUARD" => "T1406",
+
+        // Insecure at-rest exposure → Access Stored Application Data.
+        "SAST_WORLD_READABLE" | "SAST_SHARED_PREFS_INSECURE" | "SAST_EXTERNAL_STORAGE" => "T1409",
+
+        // Collection — data/sensor capture capabilities.
+        "API_GPS_LOCATION" | "PERM_LOCATION" => "T1430", // Location Tracking
+        "API_MICROPHONE" => "T1429",                     // Audio Capture
+        "API_CAMERA" => "T1512",                         // Video Capture
+        "API_SCREEN_CAPTURE" => "T1513",                 // Screen Capture
+        "API_CLIPBOARD" | "SAST_CLIPBOARD" => "T1414",   // Clipboard Data
+        "API_CONTACTS" | "PERM_CONTACTS_ACCOUNTS" => "T1636.003", // Protected User Data: Contact List
+        "API_SMS_SEND" => "T1582",                       // SMS Control
+
+        // Discovery — device/network reconnaissance.
+        "API_INSTALLED_APPS" => "T1418", // Software Discovery
+        "API_WIFI_INFO" | "API_NETWORK_INTERFACE" => "T1422", // System Network Configuration Discovery
+        // Device profiling by trackers/telemetry → System Information Discovery.
+        "PRIV_TRACKERS" | "PRIV_FINGERPRINTING" | "PRIV_TELEMETRY" => "T1426",
+
+        _ => return None,
+    };
+    Some(technique)
 }
 
 impl Finding {
@@ -134,6 +187,7 @@ impl Finding {
             line: None,
             cwe: None,
             masvs: None,
+            mitre: default_mitre(id).map(str::to_string),
             metadata: Map::new(),
         }
     }
@@ -152,6 +206,12 @@ impl Finding {
     }
     pub fn masvs(mut self, m: &str) -> Self {
         self.masvs = Some(m.to_string());
+        self
+    }
+    /// Override the MITRE ATT&CK for Mobile technique (defaults from the id).
+    #[allow(dead_code)]
+    pub fn mitre(mut self, m: &str) -> Self {
+        self.mitre = Some(m.to_string());
         self
     }
     pub fn meta(mut self, key: &str, value: Value) -> Self {
@@ -177,6 +237,9 @@ impl Finding {
         }
         if let Some(m) = &self.masvs {
             d.insert("masvs".into(), json!(m));
+        }
+        if let Some(m) = &self.mitre {
+            d.insert("mitre".into(), json!(m));
         }
         if !self.metadata.is_empty() {
             d.insert("metadata".into(), Value::Object(self.metadata.clone()));
@@ -268,4 +331,49 @@ fn round_half_even(x: f64) -> i64 {
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mitre_auto_populates_from_id() {
+        // A finding whose id maps to a verified ATT&CK Mobile technique.
+        let f = Finding::new("API_GPS_LOCATION", "GPS", "desc", Severity::High, "api");
+        assert_eq!(f.mitre.as_deref(), Some("T1430"));
+        // Serialization surfaces it next to cwe/masvs.
+        assert_eq!(f.to_json().get("mitre").and_then(|v| v.as_str()), Some("T1430"));
+    }
+
+    #[test]
+    fn mitre_absent_when_id_unmapped() {
+        // Control-weakness findings with no clean adversary technique stay null.
+        let f = Finding::new("SAST_WEAK_HASH", "MD5", "desc", Severity::High, "sast");
+        assert!(f.mitre.is_none());
+        assert!(f.to_json().get("mitre").is_none());
+    }
+
+    #[test]
+    fn mitre_builder_overrides_default() {
+        let f = Finding::new("PRIV_TRACKERS", "t", "d", Severity::Medium, "privacy").mitre("T9999");
+        assert_eq!(f.mitre.as_deref(), Some("T9999"));
+    }
+
+    #[test]
+    fn mitre_technique_ids_are_well_formed() {
+        // Every mapped id must yield a syntactically valid technique id.
+        for id in [
+            "NSC_CLEARTEXT_GLOBAL",
+            "ADV_PACKER_DETECTED",
+            "SAST_CLIPBOARD",
+            "API_CONTACTS",
+            "API_INSTALLED_APPS",
+            "PRIV_FINGERPRINTING",
+        ] {
+            let t = default_mitre(id).expect("mapped id must resolve");
+            assert!(t.starts_with('T'), "{id} -> {t}");
+            assert!(t[1..].chars().all(|c| c.is_ascii_digit() || c == '.'));
+        }
+    }
 }

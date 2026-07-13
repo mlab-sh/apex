@@ -86,7 +86,25 @@ private key (default `~/.android/adbkey`), plus `--json`/`-o`/`--detail`/`--fail
 Binary manifests are decoded with `axmldecoder`, native libraries with
 `goblin`, and APK signatures / X.509 certificates with the RustCrypto `cms` /
 `x509-cert` stack. Output (findings, security score, JSON schema) matches the
-Python reference implementation.
+Python reference implementation, with one additive enrichment: findings whose
+detected capability maps to an adversary technique also carry a `mitre` field
+(**MITRE ATT&CK for Mobile** technique id, e.g. `T1430`, `T1636.003`,
+`T1638`) so SOCs can pivot straight into ATT&CK. The mapping lives in one
+auditable table (`default_mitre` in [src/models.rs](src/models.rs)); control
+weaknesses with no clean technique equivalent are left untagged rather than
+force-mapped. Shown next to CWE/MASVS under `--detail`.
+
+The `privacy` analyzer classifies detected third-party trackers with the
+**Exodus Privacy** taxonomy (analytics / advertising / identification /
+profiling / crash-reporting / push). The advertising, identification
+(cross-app attribution) and profiling (session-replay) classes are surfaced as
+`high_risk` in the `PRIV_TRACKERS` metadata — that's where the GDPR/CCPA
+exposure sits — and the presence of a session-replay tracker escalates the
+finding to `high`. Classifications are a bundled, offline table (no network
+call at scan time) covering the SDKs APEX fingerprints; extending it to the
+full Exodus corpus (network signatures, ~450 trackers) is the natural next
+step. Static analysis reports which ad/tracking SDKs are *embedded* — proving
+which are actually *contacted at runtime* needs dynamic analysis.
 
 ## Releasing / building for all platforms
 

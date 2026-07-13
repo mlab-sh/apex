@@ -5,57 +5,73 @@ use crate::models::{AppType, Finding, Severity};
 use crate::util::{read_text, rel, rx_flags, walk_all_files};
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::path::Path;
 
 use Severity::*;
 
-const TRACKER_SIGNATURES: &[(&str, &str)] = &[
-    ("com/google/firebase/analytics", "Google Firebase Analytics"),
-    ("com/google/android/gms/analytics", "Google Analytics"),
-    ("com/google/android/gms/measurement", "Google Analytics (Measurement)"),
-    ("com/facebook/appevents", "Facebook Analytics"),
-    ("com/flurry/android", "Flurry (Yahoo)"),
-    ("com/mixpanel/android", "Mixpanel"),
-    ("com/amplitude/api", "Amplitude"),
-    ("com/segment/analytics", "Segment"),
-    ("com/heapanalytics", "Heap Analytics"),
-    ("com/countly", "Countly"),
-    ("ly/count/android", "Countly"),
-    ("com/adjust/sdk", "Adjust"),
-    ("com/appsflyer", "AppsFlyer"),
-    ("io/branch/referral", "Branch.io"),
-    ("com/kochava", "Kochava"),
-    ("com/singular/sdk", "Singular"),
-    ("com/tenjin", "Tenjin"),
-    ("com/crashlytics", "Crashlytics (Firebase)"),
-    ("com/bugsnag", "Bugsnag"),
-    ("io/sentry/android", "Sentry"),
-    ("com/instabug", "Instabug"),
-    ("com/newrelic/agent", "New Relic"),
-    ("com/google/android/gms/ads", "Google AdMob"),
-    ("com/facebook/ads", "Facebook Audience Network"),
-    ("com/mopub", "MoPub (Twitter)"),
-    ("com/applovin", "AppLovin"),
-    ("com/unity3d/ads", "Unity Ads"),
-    ("com/vungle", "Vungle"),
-    ("com/ironsource", "ironSource"),
-    ("com/inmobi/ads", "InMobi"),
-    ("com/chartboost", "Chartboost"),
-    ("com/adcolony", "AdColony"),
-    ("com/onesignal", "OneSignal"),
-    ("com/braze", "Braze"),
-    ("com/urbanairship", "Airship (Urban Airship)"),
-    ("com/batch/android", "Batch"),
-    ("com/clevertap", "CleverTap"),
-    ("com/moengage", "MoEngage"),
-    ("com/pushwoosh", "Pushwoosh"),
-    ("com/leanplum", "Leanplum"),
-    ("com/hotjar", "Hotjar"),
-    ("com/fullstory", "FullStory"),
-    ("com/smartlook", "Smartlook"),
-    ("io/uxcam", "UXCam"),
-    ("com/appdynamics", "AppDynamics"),
-    ("com/datadog", "Datadog"),
+/// Tracker classification, aligned with the Exodus Privacy taxonomy
+/// (<https://reports.exodus-privacy.eu.org/info/trackers/>). The three
+/// "high-risk" categories drive cross-app tracking / device identity /
+/// on-screen behaviour capture, which is where the GDPR/CCPA exposure sits:
+///   - `Identification`: cross-app attribution SDKs (device graph / probabilistic ID)
+///   - `Advertising`: ad networks (RTB, audience profiling)
+///   - `Profiling`: session-replay / behaviour recording
+const CAT_ANALYTICS: &str = "analytics";
+const CAT_ADVERTISING: &str = "advertising";
+const CAT_IDENTIFICATION: &str = "identification";
+const CAT_PROFILING: &str = "profiling";
+const CAT_CRASH: &str = "crash_reporting";
+const CAT_PUSH: &str = "push_engagement";
+
+/// `(package-path signature, display name, Exodus-aligned category)`.
+const TRACKER_SIGNATURES: &[(&str, &str, &str)] = &[
+    ("com/google/firebase/analytics", "Google Firebase Analytics", CAT_ANALYTICS),
+    ("com/google/android/gms/analytics", "Google Analytics", CAT_ANALYTICS),
+    ("com/google/android/gms/measurement", "Google Analytics (Measurement)", CAT_ANALYTICS),
+    ("com/facebook/appevents", "Facebook Analytics", CAT_ANALYTICS),
+    ("com/flurry/android", "Flurry (Yahoo)", CAT_ADVERTISING),
+    ("com/mixpanel/android", "Mixpanel", CAT_ANALYTICS),
+    ("com/amplitude/api", "Amplitude", CAT_ANALYTICS),
+    ("com/segment/analytics", "Segment", CAT_ANALYTICS),
+    ("com/heapanalytics", "Heap Analytics", CAT_ANALYTICS),
+    ("com/countly", "Countly", CAT_ANALYTICS),
+    ("ly/count/android", "Countly", CAT_ANALYTICS),
+    ("com/adjust/sdk", "Adjust", CAT_IDENTIFICATION),
+    ("com/appsflyer", "AppsFlyer", CAT_IDENTIFICATION),
+    ("io/branch/referral", "Branch.io", CAT_IDENTIFICATION),
+    ("com/kochava", "Kochava", CAT_IDENTIFICATION),
+    ("com/singular/sdk", "Singular", CAT_IDENTIFICATION),
+    ("com/tenjin", "Tenjin", CAT_IDENTIFICATION),
+    ("com/crashlytics", "Crashlytics (Firebase)", CAT_CRASH),
+    ("com/bugsnag", "Bugsnag", CAT_CRASH),
+    ("io/sentry/android", "Sentry", CAT_CRASH),
+    ("com/instabug", "Instabug", CAT_CRASH),
+    ("com/newrelic/agent", "New Relic", CAT_ANALYTICS),
+    ("com/google/android/gms/ads", "Google AdMob", CAT_ADVERTISING),
+    ("com/facebook/ads", "Facebook Audience Network", CAT_ADVERTISING),
+    ("com/mopub", "MoPub (Twitter)", CAT_ADVERTISING),
+    ("com/applovin", "AppLovin", CAT_ADVERTISING),
+    ("com/unity3d/ads", "Unity Ads", CAT_ADVERTISING),
+    ("com/vungle", "Vungle", CAT_ADVERTISING),
+    ("com/ironsource", "ironSource", CAT_ADVERTISING),
+    ("com/inmobi/ads", "InMobi", CAT_ADVERTISING),
+    ("com/chartboost", "Chartboost", CAT_ADVERTISING),
+    ("com/adcolony", "AdColony", CAT_ADVERTISING),
+    ("com/onesignal", "OneSignal", CAT_PUSH),
+    ("com/braze", "Braze", CAT_PUSH),
+    ("com/urbanairship", "Airship (Urban Airship)", CAT_PUSH),
+    ("com/batch/android", "Batch", CAT_PUSH),
+    ("com/clevertap", "CleverTap", CAT_PUSH),
+    ("com/moengage", "MoEngage", CAT_PUSH),
+    ("com/pushwoosh", "Pushwoosh", CAT_PUSH),
+    ("com/leanplum", "Leanplum", CAT_PUSH),
+    ("com/hotjar", "Hotjar", CAT_PROFILING),
+    ("com/fullstory", "FullStory", CAT_PROFILING),
+    ("com/smartlook", "Smartlook", CAT_PROFILING),
+    ("io/uxcam", "UXCam", CAT_PROFILING),
+    ("com/appdynamics", "AppDynamics", CAT_ANALYTICS),
+    ("com/datadog", "Datadog", CAT_ANALYTICS),
 ];
 
 const FINGERPRINT_PATTERNS: &[(&str, &str)] = &[
@@ -310,18 +326,19 @@ impl Analyzer for PrivacyAnalyzer {
 }
 
 fn detect_trackers(file_paths: &[String]) -> Vec<Finding> {
-    // tracker name -> first matched path, preserving signature order.
-    let mut found: Vec<(String, String)> = Vec::new();
+    // tracker name -> (first matched path, Exodus-aligned category), preserving
+    // signature order and deduping by display name.
+    let mut found: Vec<(String, String, &'static str)> = Vec::new();
     let mut found_names: BTreeSet<String> = BTreeSet::new();
 
-    for (pattern, name) in TRACKER_SIGNATURES {
+    for (pattern, name, category) in TRACKER_SIGNATURES {
         if found_names.contains(*name) {
             continue;
         }
         for fpath in file_paths {
             let normalized = fpath.replace('\\', "/");
             if normalized.contains(pattern) {
-                found.push((name.to_string(), normalized));
+                found.push((name.to_string(), normalized, category));
                 found_names.insert(name.to_string());
                 break;
             }
@@ -338,51 +355,132 @@ fn detect_trackers(file_paths: &[String]) -> Vec<Finding> {
         )];
     }
 
-    let names: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
-    let has = |name: &str, keys: &[&str]| {
-        let l = name.to_lowercase();
-        keys.iter().any(|k| l.contains(k))
+    // Precise per-category grouping from the classification table (no more
+    // fuzzy substring matching on the display name).
+    let by_cat = |cat: &str| -> Vec<String> {
+        found
+            .iter()
+            .filter(|(_, _, c)| *c == cat)
+            .map(|(n, _, _)| n.clone())
+            .collect()
     };
-    let analytics: Vec<&String> = names
-        .iter()
-        .filter(|n| has(n, &["analytics", "measurement", "mixpanel", "amplitude", "segment", "heap", "countly", "flurry"]))
-        .collect();
-    let ads: Vec<&String> = names
-        .iter()
-        .filter(|n| has(n, &["ad", "admob", "audience", "applovin", "unity ads", "vungle", "ironsource", "inmobi", "chartboost"]))
-        .collect();
-    let attribution: Vec<&String> = names
-        .iter()
-        .filter(|n| has(n, &["adjust", "appsflyer", "branch", "kochava", "singular", "tenjin"]))
-        .collect();
-    let crash: Vec<&String> = names
-        .iter()
-        .filter(|n| has(n, &["crash", "bugsnag", "sentry", "instabug", "new relic"]))
-        .collect();
-    let push: Vec<&String> = names
-        .iter()
-        .filter(|n| has(n, &["onesignal", "braze", "airship", "batch", "clevertap", "moengage", "pushwoosh", "leanplum"]))
-        .collect();
+    let analytics = by_cat(CAT_ANALYTICS);
+    let ads = by_cat(CAT_ADVERTISING);
+    let attribution = by_cat(CAT_IDENTIFICATION);
+    let profiling = by_cat(CAT_PROFILING);
+    let crash = by_cat(CAT_CRASH);
+    let push = by_cat(CAT_PUSH);
+
+    // High-risk = the categories driving cross-app tracking / device identity /
+    // behaviour capture — the ones that carry the real GDPR/CCPA exposure.
+    let mut high_risk: Vec<String> = Vec::new();
+    high_risk.extend(ads.iter().cloned());
+    high_risk.extend(attribution.iter().cloned());
+    high_risk.extend(profiling.iter().cloned());
+    high_risk.sort();
+    high_risk.dedup();
+
+    // Session-replay / behaviour recording is the most intrusive class (it can
+    // capture on-screen PII), so its presence escalates the finding.
+    let severity = if !profiling.is_empty() { High } else { Medium };
 
     let sorted_names: Vec<String> = found_names.iter().cloned().collect();
 
-    vec![Finding::new(
-        "PRIV_TRACKERS",
-        format!("Third-party trackers detected ({})", found.len()),
+    let mut description = format!(
+        "Found {} tracker/analytics SDK(s): {}.",
+        found.len(),
+        sorted_names.join(", ")
+    );
+    if !high_risk.is_empty() {
+        let _ = write!(
+            description,
+            " {} classified high-risk (advertising/identification/profiling): {}.",
+            high_risk.len(),
+            high_risk.join(", ")
+        );
+    }
+    if !profiling.is_empty() {
+        let _ = write!(
+            description,
+            " Includes session-replay/behaviour tracker(s) that can record on-screen activity: {}.",
+            profiling.join(", ")
+        );
+    }
+
+    let title = if high_risk.is_empty() {
+        format!("Third-party trackers detected ({})", found.len())
+    } else {
         format!(
-            "Found {} tracker/analytics SDK(s): {}.",
+            "Third-party trackers detected ({}, {} high-risk)",
             found.len(),
-            sorted_names.join(", ")
-        ),
-        Medium,
-        "privacy",
-    )
-    .masvs("MASVS-PRIVACY")
-    .meta("trackers", json!(sorted_names))
-    .meta("count", json!(found.len()))
-    .meta("analytics", json!(analytics))
-    .meta("advertising", json!(ads))
-    .meta("attribution", json!(attribution))
-    .meta("crash_reporting", json!(crash))
-    .meta("push_engagement", json!(push))]
+            high_risk.len()
+        )
+    };
+
+    vec![Finding::new("PRIV_TRACKERS", title, description, severity, "privacy")
+        .masvs("MASVS-PRIVACY")
+        .meta("trackers", json!(sorted_names))
+        .meta("count", json!(found.len()))
+        .meta("analytics", json!(analytics))
+        .meta("advertising", json!(ads))
+        .meta("attribution", json!(attribution))
+        .meta("profiling", json!(profiling))
+        .meta("crash_reporting", json!(crash))
+        .meta("push_engagement", json!(push))
+        .meta("high_risk", json!(high_risk))]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker_finding(paths: &[&str]) -> Finding {
+        let owned: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        detect_trackers(&owned).into_iter().next().unwrap()
+    }
+
+    fn meta_list<'a>(f: &'a Finding, key: &str) -> Vec<&'a str> {
+        f.metadata
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn no_trackers_yields_info() {
+        let f = tracker_finding(&["classes/com/example/App.smali"]);
+        assert_eq!(f.id, "PRIV_NO_TRACKERS");
+        assert_eq!(f.severity, Severity::Info);
+    }
+
+    #[test]
+    fn analytics_only_stays_medium_and_not_high_risk() {
+        let f = tracker_finding(&["smali/com/mixpanel/android/Mixpanel.smali"]);
+        assert_eq!(f.id, "PRIV_TRACKERS");
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(meta_list(&f, "analytics"), vec!["Mixpanel"]);
+        assert!(meta_list(&f, "high_risk").is_empty());
+    }
+
+    #[test]
+    fn ad_and_attribution_are_high_risk_but_not_escalated() {
+        let f = tracker_finding(&[
+            "smali/com/google/android/gms/ads/Ad.smali",
+            "smali/com/appsflyer/AF.smali",
+        ]);
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(meta_list(&f, "advertising"), vec!["Google AdMob"]);
+        assert_eq!(meta_list(&f, "attribution"), vec!["AppsFlyer"]);
+        let hr = meta_list(&f, "high_risk");
+        assert!(hr.contains(&"Google AdMob") && hr.contains(&"AppsFlyer"));
+    }
+
+    #[test]
+    fn session_replay_tracker_escalates_to_high() {
+        let f = tracker_finding(&["smali/io/uxcam/UXCam.smali"]);
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(meta_list(&f, "profiling"), vec!["UXCam"]);
+        assert!(meta_list(&f, "high_risk").contains(&"UXCam"));
+    }
 }

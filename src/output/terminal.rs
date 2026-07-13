@@ -98,6 +98,9 @@ pub fn print_finding(finding: &Finding, detail: bool) {
         if let Some(masvs) = &finding.masvs {
             tags.push(masvs.clone());
         }
+        if let Some(mitre) = &finding.mitre {
+            tags.push(format!("ATT&CK {mitre}"));
+        }
         if !tags.is_empty() {
             println!("      {}", dim(&format!("[{}]", tags.join(" · "))));
         }

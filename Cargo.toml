@@ -1,6 +1,6 @@
 [package]
 name = "apex"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "APEX — Static analysis for APK/IPA (mlab.sh), Rust edition"
 license = "GPL-3.0-only"
