@@ -267,6 +267,11 @@ impl ScanResult {
         severity_counts(&self.findings)
     }
 
+    /// Number of findings at a given severity.
+    pub fn count_sev(&self, sev: Severity) -> u64 {
+        self.findings.iter().filter(|f| f.severity == sev).count() as u64
+    }
+
     /// Weighted security score 0-100 (100 = no issues).
     pub fn security_score(&self) -> i64 {
         security_score(&self.findings)

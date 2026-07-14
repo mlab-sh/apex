@@ -22,6 +22,18 @@ pub fn is_stalkerware(pkg: &str) -> bool {
     STALKERWARE_PACKAGES.contains(&pkg)
 }
 
+/// A single-package stalkerware finding (used by offline analysis, where each
+/// package is scanned individually).
+pub fn stalkerware_package_finding(pkg: &str) -> Finding {
+    Finding::new(
+        "PKG_STALKERWARE",
+        "Known stalkerware/spyware package",
+        format!("Package '{pkg}' matches the Echap stalkerware indicator set by exact name — covert monitoring software. Investigate carefully before removal in case of an abusive context."),
+        Severity::Critical,
+        "stalkerware",
+    )
+}
+
 /// One aggregate finding if any installed package matches the stalkerware set.
 pub fn stalkerware_finding(packages: &[String]) -> Option<Finding> {
     let hits: Vec<String> = packages
@@ -125,6 +137,7 @@ pub fn collect_posture(phone: &mut Phone) -> Result<Posture, String> {
         rows: vec![
             ("model", get("ro.product.model")),
             ("manufacturer", get("ro.product.manufacturer")),
+            ("serial", get("ro.serialno")),
             ("android", get("ro.build.version.release")),
             ("sdk", get("ro.build.version.sdk")),
             ("security_patch", get("ro.build.version.security_patch")),

@@ -59,6 +59,29 @@ Flags:
 - `--fail-on <critical|high|medium|low|info>` — non-zero exit for CI when a
   finding at that severity or above is present.
 
+## Analyze an existing extraction (offline, no device)
+
+Seized phones usually have USB debugging **off** and a locked screen, so live
+ADB isn't an option — investigators work from an extraction that already exists.
+`apex analyze` runs the full static pipeline over a directory tree of package
+files, no device required:
+
+```sh
+apex analyze ./extraction                    # recurse, scan every .apk/.aab/.xapk/.ipa
+apex analyze ./extraction --detail
+apex analyze ./extraction --evidence ./case  # + hashed, chain-of-custody manifest
+apex analyze ./extraction --packages installed.txt   # also match an app list vs stalkerware
+apex analyze ./extraction --json -o reports/ --fail-on high
+```
+
+It prints a per-package report, an **extraction-wide severity summary**, a
+**top-risk triage table** (worst packages first, stalkerware flagged), and the
+list of stalkerware/spyware indicator matches (by declared package name, and
+from an optional `--packages` installed-apps list). With `--evidence` it writes
+an offline bundle whose `manifest.json` hashes every input file and every report
+(see *Forensic evidence bundle* below). It reads a directory tree of package
+files — unpack a proprietary container (e.g. Cellebrite UFDR) first.
+
 ## Scan a phone over USB (ADB)
 
 Connect an Android phone in USB-debugging mode (authorize the RSA prompt), then:
@@ -82,6 +105,34 @@ private key (default `~/.android/adbkey`), plus `--json`/`-o`/`--detail`/`--fail
 Everything on-device runs over a **non-root** ADB shell; the few checks that
 benefit from root degrade gracefully when the data is unreadable.
 
+### `device acquire` — forensic acquisition
+
+Collects a structured, hashed extraction for offline analysis (feed it back to
+`apex analyze`). Non-root and read-only; every artifact is recorded in the
+evidence bundle.
+
+```sh
+apex device acquire -o ./case-42
+apex device acquire --package com.foo.bar -o ./case-42
+apex device acquire --no-logcat --no-usagestats -o ./case-42   # skip the large captures
+```
+
+Output layout:
+
+```
+case-42/
+  device/   getprop, identifiers.json (serial, android_id, fingerprint, ABI…),
+            packages.txt (pm list -f -i -u), usagestats.txt (app-usage timeline),
+            accounts.txt, wifi.txt, bluetooth.txt, device_policy.txt, logcat.txt
+  apps/<pkg>/  base.apk + every split_config.*.apk, dumpsys_package.txt
+  manifest.json / manifest.json.sha256 / audit.jsonl
+```
+
+Deliberately **out of scope** (do not improvise these): SMS/MMS, call logs and
+contacts (privacy-sensitive, legally governed), and app-private data under
+`/data/data` (requires root). Use a validated, warrant-appropriate acquisition
+tool for those.
+
 ### `device posture` — device hardening & privacy
 
 Where `scan` inspects *apps*, `posture` inspects the *device*: it flags weak
@@ -96,6 +147,44 @@ capabilities), active device-administrator apps, and installed **stalkerware**
 Property-based signals (verified boot, root) are best-effort — they can be
 spoofed — so they are reported as indicators, not attestation. Supports
 `--json`/`-o`/`--detail`/`--fail-on`.
+
+### Forensic evidence bundle (`--evidence <dir>`)
+
+`device posture` and `device scan` accept `--evidence <dir>` to write a
+tamper-evident record alongside the report, for investigative / chain-of-custody
+use:
+
+- `audit.jsonl` — every ADB action taken, in order, each with a **UTC
+  timestamp**, the **SHA-256** of its raw output, byte count and duration.
+- `manifest.json` — tool name/version, session start/end (UTC), device
+  identifiers (model, serial, build fingerprint), the SHA-256 of every acquired
+  artifact (pulled APKs) and of every report, and an explicit **methodology /
+  alteration statement** describing what a live ADB acquisition touches.
+- `manifest.json.sha256` — detached hash so the whole bundle is verifiable.
+
+```sh
+apex device posture --evidence ./case-42
+apex device scan --evidence ./case-42
+```
+
+This documents and hashes exactly what APEX did; it is **not** a forensic image
+and captures no app-private data, deleted content, or physical/file-system dump —
+use a validated acquisition tool for evidential imaging.
+
+### Verify a bundle (`apex verify`)
+
+Re-checks an evidence bundle (from `device posture/scan/acquire` or offline
+`analyze`) and confirms nothing changed since acquisition — recomputes the
+manifest's own hash and re-hashes every file, matching by hash so it survives
+the bundle being moved:
+
+```sh
+apex verify ./case-42            # exit 0 = VERIFIED, exit 1 = tampered/incomplete
+```
+
+It reports matched artifacts, any **recorded-but-missing/altered** files
+(integrity failure), extra files not in the manifest, and — for offline bundles
+— the external source inputs it can't re-check from the bundle alone.
 
 ### Runtime enrichment in `device scan`
 
@@ -131,7 +220,12 @@ profiling / crash-reporting / push). The advertising, identification
 (cross-app attribution) and profiling (session-replay) classes are surfaced as
 `high_risk` in the `PRIV_TRACKERS` metadata — that's where the GDPR/CCPA
 exposure sits — and the presence of a session-replay tracker escalates the
-finding to `high`. Classifications are a bundled, offline table (no network
+finding to `high`. The on-device / offline stalkerware check matches installed packages against a
+bundled indicator set (exact package name) sourced from the
+[Echap `stalkerware-indicators`](https://github.com/AssoEchap/stalkerware-indicators)
+project; refresh it with `scripts/update-iocs.sh` as the upstream list evolves.
+
+Classifications are a bundled, offline table (no network
 call at scan time) covering the SDKs APEX fingerprints; extending it to the
 full Exodus corpus (network signatures, ~450 trackers) is the natural next
 step. Static analysis reports which ad/tracking SDKs are *embedded* — proving

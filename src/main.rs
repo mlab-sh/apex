@@ -5,17 +5,19 @@ mod analyzers;
 mod cert_util;
 mod device;
 mod elf_util;
+mod evidence;
 mod models;
 mod output;
 mod scanner;
 mod stalkerware_iocs;
 mod util;
+mod verify;
 mod xml;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use output::json::export_json;
 use output::terminal::{print_finding, print_header, print_summary};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const SEVERITY_ORDER: [&str; 5] = ["critical", "high", "medium", "low", "info"];
@@ -35,8 +37,43 @@ struct Cli {
 enum Command {
     /// Analyze an APK/IPA/AAB/XAPK file
     Scan(ScanArgs),
+    /// Analyze an existing extraction offline (a directory of APKs, no device)
+    Analyze(AnalyzeArgs),
+    /// Verify the integrity of a forensic evidence bundle (recompute hashes)
+    Verify(VerifyArgs),
     /// Connect to an Android phone over USB (ADB) and scan its installed apps
     Device(DeviceArgs),
+}
+
+#[derive(clap::Args)]
+struct VerifyArgs {
+    /// Evidence bundle directory (or path to its manifest.json)
+    path: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct AnalyzeArgs {
+    /// Extraction directory to analyze (recursively) — or a single package file
+    path: PathBuf,
+    /// Also match this newline-separated list of installed package names against
+    /// the stalkerware indicators (e.g. an extraction's installed-apps list)
+    #[arg(long = "packages")]
+    packages: Option<PathBuf>,
+    /// Write a JSON report per package
+    #[arg(long = "json")]
+    json_output: bool,
+    /// Directory for JSON reports (default: current directory)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+    /// Print the proof/evidence under each finding
+    #[arg(long)]
+    detail: bool,
+    /// Write a forensic evidence bundle (hashed inputs + manifest) to this dir
+    #[arg(long = "evidence")]
+    evidence: Option<PathBuf>,
+    /// Exit with code 1 if any finding at this severity or above (for CI/CD)
+    #[arg(long = "fail-on", value_enum)]
+    fail_on: Option<FailLevel>,
 }
 
 #[derive(clap::Args)]
@@ -55,6 +92,8 @@ enum DeviceAction {
     Posture(DevicePostureArgs),
     /// Pull all non-system APKs + device info to a local directory
     Dump(DeviceDumpArgs),
+    /// Forensic acquisition: APK splits + device metadata/logs + evidence bundle
+    Acquire(DeviceAcquireArgs),
     /// Pull and scan installed non-system apps
     Scan(DeviceScanArgs),
     /// Run a raw ADB shell command on the device (power-user / debugging)
@@ -75,6 +114,9 @@ struct DevicePostureArgs {
     /// Print the proof/evidence under each finding
     #[arg(long)]
     detail: bool,
+    /// Write a forensic evidence bundle (audit log + hashed manifest) to this dir
+    #[arg(long = "evidence")]
+    evidence: Option<PathBuf>,
     /// Exit with code 1 if any finding at this severity or above (for CI/CD)
     #[arg(long = "fail-on", value_enum)]
     fail_on: Option<FailLevel>,
@@ -98,6 +140,25 @@ struct DeviceDumpArgs {
     /// Output directory (default: ./apex_dump)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+    /// Path to a custom ADB private key (default: ~/.android/adbkey)
+    #[arg(long = "adb-key")]
+    adb_key: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct DeviceAcquireArgs {
+    /// Output directory (default: ./apex_acquire)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+    /// Acquire only this package (default: every third-party app)
+    #[arg(long)]
+    package: Option<String>,
+    /// Skip the (large) logcat capture
+    #[arg(long = "no-logcat")]
+    no_logcat: bool,
+    /// Skip the (large) usage-stats capture
+    #[arg(long = "no-usagestats")]
+    no_usagestats: bool,
     /// Path to a custom ADB private key (default: ~/.android/adbkey)
     #[arg(long = "adb-key")]
     adb_key: Option<PathBuf>,
@@ -140,6 +201,9 @@ struct DeviceScanArgs {
     /// Skip on-device runtime enrichment (granted permissions, app-ops, installer)
     #[arg(long = "no-runtime")]
     no_runtime: bool,
+    /// Write a forensic evidence bundle (audit log + hashed manifest) to this dir
+    #[arg(long = "evidence")]
+    evidence: Option<PathBuf>,
     /// Exit with code 1 if any finding at this severity or above (for CI/CD)
     #[arg(long = "fail-on", value_enum)]
     fail_on: Option<FailLevel>,
@@ -191,11 +255,14 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Scan(args) => run_scan(args),
+        Command::Analyze(args) => run_analyze(args),
+        Command::Verify(args) => run_verify(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
             DeviceAction::Posture(a) => run_device_posture(a),
             DeviceAction::Dump(a) => run_device_dump(a),
+            DeviceAction::Acquire(a) => run_device_acquire(a),
             DeviceAction::Scan(a) => run_device_scan(a),
             DeviceAction::Shell(a) => run_device_shell(a),
         },
@@ -206,6 +273,7 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
     use models::{security_score, severity_counts, Severity};
     use serde_json::{json, Value};
 
+    let adb_key = args.adb_key.clone();
     let mut phone = match device::Phone::connect(args.adb_key) {
         Ok(p) => p,
         Err(e) => {
@@ -275,32 +343,60 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
         println!();
     }
 
+    let info: serde_json::Map<String, Value> = posture
+        .info
+        .rows
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| ((*k).to_string(), json!(v)))
+        .collect();
+    let report = json!({
+        "schema_version": 1,
+        "kind": "device_posture",
+        "device": info.clone(),
+        "rooted": posture.rooted,
+        "posture_score": security_score(&findings),
+        "summary": severity_counts(&findings),
+        "findings": findings.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
+    });
+    let report_text = serde_json::to_string_pretty(&report).unwrap_or_default();
+
     if args.json_output {
-        let info: serde_json::Map<String, Value> = posture
-            .info
-            .rows
-            .iter()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(k, v)| ((*k).to_string(), json!(v)))
-            .collect();
-        let report = json!({
-            "schema_version": 1,
-            "kind": "device_posture",
-            "device": info,
-            "rooted": posture.rooted,
-            "posture_score": security_score(&findings),
-            "summary": severity_counts(&findings),
-            "findings": findings.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
-        });
-        let text = serde_json::to_string_pretty(&report).unwrap_or_default();
         if let Some(path) = &args.output {
-            if let Err(e) = std::fs::write(path, &text) {
+            if let Err(e) = std::fs::write(path, &report_text) {
                 eprintln!("\x1b[31mError writing JSON: {e}\x1b[0m");
                 return ExitCode::from(1);
             }
             println!("\x1b[32mJSON report: {}\x1b[0m", path.display());
         } else if !args.detail {
-            println!("{text}");
+            println!("{report_text}");
+        }
+    }
+
+    // Forensic evidence bundle: report + audit log + hashed manifest.
+    if let Some(dir) = &args.evidence {
+        let report_path = dir.join("posture_report.json");
+        if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&report_path, &report_text)) {
+            eprintln!("\x1b[31mError writing evidence report: {e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+        match evidence::write_evidence(
+            dir,
+            &phone,
+            "device_posture",
+            Value::Object(info),
+            &[report_path],
+            Vec::new(),
+            adb_key.as_deref(),
+        ) {
+            Ok((mpath, sha)) => {
+                println!("\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
+                println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);
+            }
+            Err(e) => {
+                eprintln!("\x1b[31mError writing evidence bundle: {e}\x1b[0m");
+                return ExitCode::from(1);
+            }
         }
     }
 
@@ -310,6 +406,156 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
         let failing: std::collections::HashSet<&str> =
             SEVERITY_ORDER[..=idx].iter().copied().collect();
         if findings.iter().any(|f| failing.contains(f.severity.value())) {
+            return ExitCode::from(1);
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Run a shell command, save its stdout to `path`, and record the file as a
+/// hashed collected-artifact for the evidence manifest.
+fn acquire_save(
+    phone: &mut device::Phone,
+    cmd: &str,
+    path: &Path,
+    out_root: &Path,
+    collected: &mut Vec<serde_json::Value>,
+) {
+    use serde_json::json;
+    match phone.run(cmd) {
+        Ok(text) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(path, text.as_bytes()) {
+                eprintln!("\x1b[33m[warn] cannot write {}: {e}\x1b[0m", path.display());
+                return;
+            }
+            let sha = scanner::compute_hash(path).unwrap_or_default();
+            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let rel = path.strip_prefix(out_root).unwrap_or(path).to_string_lossy().into_owned();
+            collected.push(json!({
+                "file": rel,
+                "sha256": sha,
+                "bytes": bytes,
+                "source_cmd": cmd,
+            }));
+        }
+        Err(e) => eprintln!("\x1b[33m[warn] '{cmd}': {e}\x1b[0m"),
+    }
+}
+
+fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
+    use serde_json::json;
+
+    let adb_key = args.adb_key.clone();
+    let mut phone = match device::Phone::connect(args.adb_key) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+
+    let out = args.output.unwrap_or_else(|| PathBuf::from("apex_acquire"));
+    let device_dir = out.join("device");
+    let apps_dir = out.join("apps");
+    for d in [&out, &device_dir, &apps_dir] {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("\x1b[31mcannot create {}: {e}\x1b[0m", d.display());
+            return ExitCode::from(1);
+        }
+    }
+
+    println!("\x1b[1m\x1b[36mForensic acquisition → {}\x1b[0m", out.display());
+    let mut collected: Vec<serde_json::Value> = Vec::new();
+
+    // ---- Device-level metadata & logs (non-root, read-only). ----
+    println!("\x1b[2m  device metadata…\x1b[0m");
+    acquire_save(&mut phone, "getprop", &device_dir.join("getprop.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "pm list packages -f -i -u", &device_dir.join("packages.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys device_policy", &device_dir.join("device_policy.txt"), &out, &mut collected);
+    if !args.no_usagestats {
+        println!("\x1b[2m  usage stats…\x1b[0m");
+        acquire_save(&mut phone, "dumpsys usagestats", &device_dir.join("usagestats.txt"), &out, &mut collected);
+    }
+    if !args.no_logcat {
+        println!("\x1b[2m  logcat…\x1b[0m");
+        acquire_save(&mut phone, "logcat -d -v threadtime", &device_dir.join("logcat.txt"), &out, &mut collected);
+    }
+
+    // Device identifiers (best-effort; some are restricted on non-root shells).
+    let props = phone.props().unwrap_or_default();
+    let prop = |k: &str| props.get(k).cloned().unwrap_or_default();
+    let android_id = phone.run("settings get secure android_id").map(|s| s.trim().to_string()).unwrap_or_default();
+    let identifiers = json!({
+        "model": prop("ro.product.model"),
+        "manufacturer": prop("ro.product.manufacturer"),
+        "serial": prop("ro.serialno"),
+        "android_id": android_id,
+        "android_release": prop("ro.build.version.release"),
+        "sdk": prop("ro.build.version.sdk"),
+        "security_patch": prop("ro.build.version.security_patch"),
+        "build_fingerprint": prop("ro.build.fingerprint"),
+        "cpu_abi": prop("ro.product.cpu.abi"),
+    });
+    let id_path = device_dir.join("identifiers.json");
+    if std::fs::write(&id_path, serde_json::to_string_pretty(&identifiers).unwrap_or_default()).is_ok() {
+        let sha = scanner::compute_hash(&id_path).unwrap_or_default();
+        let bytes = std::fs::metadata(&id_path).map(|m| m.len()).unwrap_or(0);
+        collected.push(json!({"file": "device/identifiers.json", "sha256": sha, "bytes": bytes, "source_cmd": "getprop + settings android_id"}));
+    }
+
+    // ---- Per-app acquisition: ALL APK splits + full dumpsys package. ----
+    let packages: Vec<String> = match &args.package {
+        Some(p) => vec![p.clone()],
+        None => match phone.list_third_party() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    println!("\x1b[2m  {} app(s): APK splits + dumpsys…\x1b[0m", packages.len());
+    let mut apk_count = 0usize;
+    for (i, pkg) in packages.iter().enumerate() {
+        let appdir = apps_dir.join(pkg);
+        if let Err(e) = std::fs::create_dir_all(&appdir) {
+            eprintln!("\x1b[33m[skip] {pkg}: {e}\x1b[0m");
+            continue;
+        }
+        let paths = phone.apk_paths(pkg).unwrap_or_default();
+        for remote in &paths {
+            let base = remote.rsplit('/').next().unwrap_or("base.apk");
+            let local = appdir.join(base);
+            if phone.pull(remote, &local).is_ok() {
+                apk_count += 1;
+            } else {
+                eprintln!("\x1b[33m[warn] {pkg}: pull {remote} failed\x1b[0m");
+            }
+        }
+        acquire_save(&mut phone, &format!("dumpsys package {pkg}"), &appdir.join("dumpsys_package.txt"), &out, &mut collected);
+        println!("  \x1b[32m[{:>3}/{}]\x1b[0m {pkg}  \x1b[2m({} apk)\x1b[0m", i + 1, packages.len(), paths.len());
+    }
+
+    // ---- Evidence bundle (audit trail auto-includes every pull + shell). ----
+    match evidence::write_evidence(&out, &phone, "device_acquire", identifiers, &[], collected, adb_key.as_deref()) {
+        Ok((mpath, sha)) => {
+            println!(
+                "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) → {}\x1b[0m",
+                packages.len(),
+                apk_count,
+                out.display()
+            );
+            println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);
+        }
+        Err(e) => {
+            eprintln!("\x1b[31mError writing evidence bundle: {e}\x1b[0m");
             return ExitCode::from(1);
         }
     }
@@ -402,6 +648,257 @@ fn run_scan(mut args: ScanArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn run_analyze(args: AnalyzeArgs) -> ExitCode {
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+
+    if !args.path.exists() {
+        eprintln!("\x1b[31mError: path not found — {}\x1b[0m", args.path.display());
+        return ExitCode::from(1);
+    }
+
+    let started_utc = chrono::Utc::now().to_rfc3339();
+
+    // Gather analyzable package files (recursively for a directory).
+    let mut files: Vec<PathBuf> = Vec::new();
+    if args.path.is_dir() {
+        for e in walkdir::WalkDir::new(&args.path).into_iter().filter_map(|e| e.ok()) {
+            if e.file_type().is_file() && scanner::detect_app_type(e.path()).is_some() {
+                files.push(e.path().to_path_buf());
+            }
+        }
+        files.sort();
+    } else if scanner::detect_app_type(&args.path).is_some() {
+        files.push(args.path.clone());
+    } else {
+        eprintln!(
+            "\x1b[31mError: unsupported file. Valid extensions: {}\x1b[0m",
+            scanner::VALID_EXTENSIONS.join(", ")
+        );
+        return ExitCode::from(1);
+    }
+
+    if files.is_empty() {
+        println!("No analyzable packages found under {}.", args.path.display());
+        return ExitCode::SUCCESS;
+    }
+
+    println!(
+        "\x1b[1m\x1b[36mAnalyzing {} package(s) offline from {}…\x1b[0m",
+        files.len(),
+        args.path.display()
+    );
+
+    // Reports must land on disk before the manifest can hash them.
+    if let Some(dir) = &args.evidence {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("\x1b[31mcannot create {}: {e}\x1b[0m", dir.display());
+            return ExitCode::from(1);
+        }
+    }
+
+    let mut inputs_meta: Vec<Value> = Vec::new();
+    let mut report_paths: Vec<PathBuf> = Vec::new();
+    let mut any_fail = false;
+    let mut sw_hits: Vec<String> = Vec::new();
+    let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+    // Per-app triage rows: (label, score, critical, high, stalkerware).
+    let mut triage: Vec<(String, i64, u64, u64, bool)> = Vec::new();
+
+    for f in &files {
+        let hash = scanner::compute_hash(f).unwrap_or_default();
+        let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        let mut result = scanner::scan::<fn(&models::Finding)>(f, None);
+
+        // Offline stalkerware match by declared package name.
+        let pkg = result
+            .app_info
+            .get("package")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut is_sw = false;
+        if !pkg.is_empty() && adb_checks::is_stalkerware(&pkg) {
+            is_sw = true;
+            sw_hits.push(pkg.clone());
+            result.findings.push(adb_checks::stalkerware_package_finding(&pkg));
+        }
+
+        let label = f
+            .strip_prefix(&args.path)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .into_owned();
+        print_header(&format!("{label}  [{pkg}]"), "apk");
+        for finding in &result.findings {
+            print_finding(finding, args.detail);
+        }
+        print_summary(&result);
+
+        // Aggregate.
+        for (k, v) in result.summary() {
+            if let Some(n) = v.as_u64() {
+                *totals.entry(k).or_insert(0) += n;
+            }
+        }
+        let crit = result.count_sev(models::Severity::Critical);
+        let high = result.count_sev(models::Severity::High);
+        triage.push((if pkg.is_empty() { label.clone() } else { pkg.clone() }, result.security_score(), crit, high, is_sw));
+
+        inputs_meta.push(json!({
+            "file": label,
+            "package": pkg,
+            "sha256": hash,
+            "bytes": size,
+        }));
+
+        let want_report = args.json_output || args.evidence.is_some();
+        if want_report {
+            let base = pkg_or_stem(f, &pkg);
+            if args.json_output {
+                let dir = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
+                if let Ok(p) = export_json(&result, Some(&dir.join(format!("{base}_report.json")))) {
+                    println!("\x1b[32mJSON report: {}\x1b[0m", p.display());
+                }
+            }
+            if let Some(edir) = &args.evidence {
+                if let Ok(p) = export_json(&result, Some(&edir.join(format!("{base}_report.json")))) {
+                    report_paths.push(p);
+                }
+            }
+        }
+
+        if fails_threshold(&result, args.fail_on) {
+            any_fail = true;
+        }
+    }
+
+    // Optional: match a plain installed-apps list against the indicators.
+    if let Some(pf) = &args.packages {
+        match std::fs::read_to_string(pf) {
+            Ok(text) => {
+                for line in text.lines() {
+                    let p = line.trim().strip_prefix("package:").unwrap_or(line.trim());
+                    if !p.is_empty() && adb_checks::is_stalkerware(p) && !sw_hits.contains(&p.to_string()) {
+                        sw_hits.push(p.to_string());
+                    }
+                }
+            }
+            Err(e) => eprintln!("\x1b[33m[warn] cannot read --packages {}: {e}\x1b[0m", pf.display()),
+        }
+    }
+
+    // ---- Aggregate summary across the extraction. ----
+    println!("\n\x1b[1m\x1b[36mExtraction summary\x1b[0m ({} package(s))", files.len());
+    for sev in models::Severity::ALL {
+        let n = totals.get(sev.value()).copied().unwrap_or(0);
+        let label = sev.value().to_uppercase();
+        if n > 0 {
+            println!("  \x1b[{}m{:<10}\x1b[0m {:>6}", sev.ansi(), label, n);
+        } else {
+            println!("  \x1b[2m{label:<10} {n:>6}\x1b[0m");
+        }
+    }
+
+    // Triage: worst apps first (stalkerware, then most critical/high, then score).
+    triage.sort_by(|a, b| {
+        b.4.cmp(&a.4)
+            .then(b.2.cmp(&a.2))
+            .then(b.3.cmp(&a.3))
+            .then(a.1.cmp(&b.1))
+    });
+    println!("\n\x1b[1mTop-risk packages\x1b[0m");
+    for (name, score, crit, high, sw) in triage.iter().take(10) {
+        let flag = if *sw { " \x1b[91m[STALKERWARE]\x1b[0m" } else { "" };
+        println!("  \x1b[1m{score:>3}/100\x1b[0m  C:{crit} H:{high}  {name}{flag}");
+    }
+
+    if !sw_hits.is_empty() {
+        sw_hits.sort();
+        sw_hits.dedup();
+        println!(
+            "\n\x1b[91m\x1b[1m[!] {} stalkerware/spyware indicator match(es): {}\x1b[0m",
+            sw_hits.len(),
+            sw_hits.join(", ")
+        );
+    }
+
+    // ---- Offline evidence bundle. ----
+    if let Some(dir) = &args.evidence {
+        match evidence::write_offline_evidence(
+            dir,
+            &args.path.display().to_string(),
+            &started_utc,
+            inputs_meta,
+            &report_paths,
+        ) {
+            Ok((mpath, sha)) => {
+                println!("\n\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
+                println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);
+            }
+            Err(e) => eprintln!("\x1b[31mError writing evidence bundle: {e}\x1b[0m"),
+        }
+    }
+
+    if any_fail {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_verify(args: VerifyArgs) -> ExitCode {
+    let report = match verify::verify_bundle(&args.path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+
+    print_header(&format!("Verify — {}", args.path.display()), "evidence");
+
+    match report.manifest_ok {
+        Some(true) => println!("  \x1b[32m✓ manifest self-hash matches manifest.json.sha256\x1b[0m"),
+        Some(false) => println!("  \x1b[91m✗ manifest self-hash MISMATCH — manifest altered\x1b[0m"),
+        None => println!("  \x1b[33m• no detached manifest.json.sha256 to check\x1b[0m"),
+    }
+    println!("  \x1b[32m✓ {} artifact(s) match recorded hashes\x1b[0m", report.matched.len());
+    if report.external > 0 {
+        println!("  \x1b[2m• {} external input(s) recorded (offline source, not in bundle)\x1b[0m", report.external);
+    }
+    if !report.missing.is_empty() {
+        println!("  \x1b[91m✗ {} recorded artifact(s) MISSING/altered:\x1b[0m", report.missing.len());
+        for m in &report.missing {
+            println!("      \x1b[91m{m}\x1b[0m");
+        }
+    }
+    if !report.unlisted.is_empty() {
+        println!("  \x1b[33m• {} file(s) present but not in manifest (added after acquisition?):\x1b[0m", report.unlisted.len());
+        for u in report.unlisted.iter().take(20) {
+            println!("      \x1b[33m{u}\x1b[0m");
+        }
+    }
+
+    println!();
+    if report.passed() {
+        println!("\x1b[1m\x1b[32mBundle integrity: VERIFIED\x1b[0m\n");
+        ExitCode::SUCCESS
+    } else {
+        println!("\x1b[1m\x1b[91mBundle integrity: FAILED\x1b[0m\n");
+        ExitCode::from(1)
+    }
+}
+
+/// A filesystem-safe report basename: the package name if known, else the file stem.
+fn pkg_or_stem(path: &Path, pkg: &str) -> String {
+    if !pkg.is_empty() {
+        pkg.to_string()
+    } else {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("report").to_string()
+    }
 }
 
 fn fails_threshold(result: &models::ScanResult, fail_on: Option<FailLevel>) -> bool {
@@ -625,6 +1122,9 @@ fn run_device_dump(args: DeviceDumpArgs) -> ExitCode {
 }
 
 fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
+    use serde_json::json;
+
+    let adb_key = args.adb_key.clone();
     let mut phone = match device::Phone::connect(args.adb_key) {
         Ok(p) => p,
         Err(e) => {
@@ -632,6 +1132,16 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    // For an evidence run, reports must land on disk to be hashed.
+    let evidence_dir = args.evidence.clone();
+    if let Some(dir) = &evidence_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("\x1b[31mcannot create {}: {e}\x1b[0m", dir.display());
+            return ExitCode::from(1);
+        }
+    }
+    let mut report_paths: Vec<PathBuf> = Vec::new();
 
     let packages: Vec<String> = match &args.package {
         Some(p) => vec![p.clone()],
@@ -706,12 +1216,42 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
             }
         }
 
+        // For an evidence run, always persist the per-app report for hashing.
+        if let Some(dir) = &evidence_dir {
+            let out_path = dir.join(format!("{pkg}_report.json"));
+            match export_json(&result, Some(&out_path)) {
+                Ok(p) => report_paths.push(p),
+                Err(e) => eprintln!("\x1b[31mError writing evidence report for {pkg}: {e}\x1b[0m"),
+            }
+        }
+
         if fails_threshold(&result, args.fail_on) {
             any_fail = true;
         }
     }
 
     println!("\x1b[1mScanned {ok}/{} app(s).\x1b[0m", packages.len());
+
+    if let Some(dir) = &evidence_dir {
+        let props = phone.props().unwrap_or_default();
+        let pick = |k: &str| props.get(k).cloned().unwrap_or_default();
+        let device = json!({
+            "model": pick("ro.product.model"),
+            "manufacturer": pick("ro.product.manufacturer"),
+            "serial": pick("ro.serialno"),
+            "android": pick("ro.build.version.release"),
+            "sdk": pick("ro.build.version.sdk"),
+            "security_patch": pick("ro.build.version.security_patch"),
+            "build_fingerprint": pick("ro.build.fingerprint"),
+        });
+        match evidence::write_evidence(dir, &phone, "device_scan", device, &report_paths, Vec::new(), adb_key.as_deref()) {
+            Ok((mpath, sha)) => {
+                println!("\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
+                println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);
+            }
+            Err(e) => eprintln!("\x1b[31mError writing evidence bundle: {e}\x1b[0m"),
+        }
+    }
 
     if any_fail {
         ExitCode::from(1)
