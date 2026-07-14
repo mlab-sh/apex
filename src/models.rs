@@ -139,7 +139,12 @@ pub fn default_mitre(id: &str) -> Option<&'static str> {
         | "NET_PINNING_BYPASS"
         | "SAST_SSL_INSECURE"
         | "SAST_WEBVIEW_SSL_BYPASS"
-        | "SAST_SELF_SIGNED_CERT" => "T1638",
+        | "SAST_SELF_SIGNED_CERT"
+        // A device-wide HTTP proxy is the on-device AiTM interception point.
+        | "DEV_HTTP_PROXY" => "T1638",
+
+        // A notification listener reads every notification → Access Notifications.
+        "DEV_NOTIF_LISTENER" => "T1517",
 
         // Anti-analysis → Obfuscated Files or Information (packing is .002).
         "ADV_PACKER_DETECTED" => "T1406.002",
@@ -259,38 +264,12 @@ pub struct ScanResult {
 
 impl ScanResult {
     pub fn summary(&self) -> Map<String, Value> {
-        let mut counts = Map::new();
-        for s in Severity::ALL {
-            counts.insert(s.value().to_string(), json!(0u64));
-        }
-        for f in &self.findings {
-            let key = f.severity.value();
-            let cur = counts.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
-            counts.insert(key.to_string(), json!(cur + 1));
-        }
-        counts.insert("total".into(), json!(self.findings.len() as u64));
-        counts
-    }
-
-    pub fn count(&self, sev: Severity) -> u64 {
-        self.findings.iter().filter(|f| f.severity == sev).count() as u64
+        severity_counts(&self.findings)
     }
 
     /// Weighted security score 0-100 (100 = no issues).
     pub fn security_score(&self) -> i64 {
-        let c = self.count(Severity::Critical) as f64;
-        let h = self.count(Severity::High) as f64;
-        let m = self.count(Severity::Medium) as f64;
-        let l = self.count(Severity::Low) as f64;
-        let penalty = (c * 15.0).min(60.0)
-            + (h * 5.0).min(30.0)
-            + (m * 1.0).min(15.0)
-            + (l * 0.5).min(5.0);
-        let score = 100.0 - penalty;
-        // Python round() uses banker's rounding, but penalties here are always
-        // integers or x.5 sums; round half to even to stay faithful.
-        let rounded = round_half_even(score);
-        rounded.max(0) as i64
+        security_score(&self.findings)
     }
 
     pub fn to_json(&self) -> Value {
@@ -312,6 +291,41 @@ impl ScanResult {
         );
         Value::Object(d)
     }
+}
+
+/// Weighted security score 0-100 (100 = no issues) for any finding set.
+///
+/// Same weighting the Python reference uses for a package scan, reused for the
+/// on-device posture report so both surfaces score consistently.
+pub fn security_score(findings: &[Finding]) -> i64 {
+    let count = |sev: Severity| findings.iter().filter(|f| f.severity == sev).count() as f64;
+    let c = count(Severity::Critical);
+    let h = count(Severity::High);
+    let m = count(Severity::Medium);
+    let l = count(Severity::Low);
+    let penalty = (c * 15.0).min(60.0)
+        + (h * 5.0).min(30.0)
+        + (m * 1.0).min(15.0)
+        + (l * 0.5).min(5.0);
+    let score = 100.0 - penalty;
+    // Python round() uses banker's rounding, but penalties here are always
+    // integers or x.5 sums; round half to even to stay faithful.
+    round_half_even(score).max(0) as i64
+}
+
+/// Severity histogram (`critical`,`high`,… + `total`) for a finding set.
+pub fn severity_counts(findings: &[Finding]) -> Map<String, Value> {
+    let mut counts = Map::new();
+    for s in Severity::ALL {
+        counts.insert(s.value().to_string(), json!(0u64));
+    }
+    for f in findings {
+        let key = f.severity.value();
+        let cur = counts.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        counts.insert(key.to_string(), json!(cur + 1));
+    }
+    counts.insert("total".into(), json!(findings.len() as u64));
+    counts
 }
 
 fn round_half_even(x: f64) -> i64 {

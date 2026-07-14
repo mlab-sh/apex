@@ -65,10 +65,12 @@ Connect an Android phone in USB-debugging mode (authorize the RSA prompt), then:
 
 ```sh
 apex device list                       # list installed third-party (non-system) apps
+apex device posture                    # assess the device's own security posture
 apex device scan                       # pull + scan every third-party app
 apex device scan --package com.foo.bar # scan a single package
 apex device scan --json -o reports/    # write <package>_report.json per app
 apex device scan --detail --fail-on high
+apex device shell "getprop ro.build.version.sdk"   # raw shell passthrough (power-user)
 ```
 
 Uses `adb_client`'s `ADBUSBDevice` for a direct USB connection (no `adb`
@@ -76,6 +78,35 @@ server required). `pm list packages -3` enumerates non-system packages,
 `pm path` resolves each base APK, which is pulled to a temp dir and run through
 the same analyzers as `apex scan`. Options: `--adb-key <PATH>` for a custom ADB
 private key (default `~/.android/adbkey`), plus `--json`/`-o`/`--detail`/`--fail-on`.
+
+Everything on-device runs over a **non-root** ADB shell; the few checks that
+benefit from root degrade gracefully when the data is unreadable.
+
+### `device posture` — device hardening & privacy
+
+Where `scan` inspects *apps*, `posture` inspects the *device*: it flags weak
+device configuration and abuse vectors, scored with the same weighted model as
+a package scan. Checks include Verified Boot / bootloader lock state, SELinux
+mode, root indicators, storage encryption, **security-patch age**, developer
+options / ADB / mock-location, a global HTTP proxy (AiTM interception point),
+enabled accessibility services and notification listeners (the most-abused
+capabilities), active device-administrator apps, and installed **stalkerware**
+(exact package-name match against the
+[Echap indicator set](https://github.com/AssoEchap/stalkerware-indicators)).
+Property-based signals (verified boot, root) are best-effort — they can be
+spoofed — so they are reported as indicators, not attestation. Supports
+`--json`/`-o`/`--detail`/`--fail-on`.
+
+### Runtime enrichment in `device scan`
+
+Static analysis reports what an app *requests*; on device, `scan` additionally
+reports what is *actually granted / active* — parsed from `dumpsys package` and
+`appops`: permissions **granted** (not merely requested), install source
+(sideloaded vs a known store), the `DEBUGGABLE`/`TEST_ONLY` runtime flags, and
+high-risk app-ops (draw-over-other-apps overlay, all-files access, silent
+install). A scanned package that matches the stalkerware set is flagged
+`critical`. These findings carry the `runtime` category and fold into the app's
+score alongside the static ones; pass `--no-runtime` to disable.
 
 ## Analyzers
 

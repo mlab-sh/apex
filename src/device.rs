@@ -31,7 +31,14 @@ impl Phone {
         Ok(Phone { dev })
     }
 
-    fn run(&mut self, cmd: &str) -> Result<String, String> {
+    /// Run an arbitrary shell command on the device and return its stdout.
+    ///
+    /// The connection uses a non-root `shell` uid unless the device is rooted
+    /// and grants it. Commands are executed via the device's `sh`, so pipes and
+    /// redirection technically work, but output is pulled in full and parsed
+    /// host-side (some `adb_client` shell transports mishandle large pipes), so
+    /// callers should prefer fetching raw output and parsing in Rust.
+    pub fn run(&mut self, cmd: &str) -> Result<String, String> {
         let mut out = Vec::new();
         let command = cmd.to_string();
         self.dev

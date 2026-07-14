@@ -1,5 +1,6 @@
 //! APEX CLI entry point — `apex scan path/to/apk`.
 
+mod adb_checks;
 mod analyzers;
 mod cert_util;
 mod device;
@@ -7,6 +8,7 @@ mod elf_util;
 mod models;
 mod output;
 mod scanner;
+mod stalkerware_iocs;
 mod util;
 mod xml;
 
@@ -49,10 +51,43 @@ enum DeviceAction {
     Listen(DeviceListenArgs),
     /// List installed non-system (third-party) packages
     List(DeviceCommonArgs),
+    /// Assess the device's own security posture (hardening, privacy, abuse vectors)
+    Posture(DevicePostureArgs),
     /// Pull all non-system APKs + device info to a local directory
     Dump(DeviceDumpArgs),
     /// Pull and scan installed non-system apps
     Scan(DeviceScanArgs),
+    /// Run a raw ADB shell command on the device (power-user / debugging)
+    Shell(DeviceShellArgs),
+}
+
+#[derive(clap::Args)]
+struct DevicePostureArgs {
+    /// Path to a custom ADB private key (default: ~/.android/adbkey)
+    #[arg(long = "adb-key")]
+    adb_key: Option<PathBuf>,
+    /// Emit the posture report as JSON
+    #[arg(long = "json")]
+    json_output: bool,
+    /// JSON output file path
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+    /// Print the proof/evidence under each finding
+    #[arg(long)]
+    detail: bool,
+    /// Exit with code 1 if any finding at this severity or above (for CI/CD)
+    #[arg(long = "fail-on", value_enum)]
+    fail_on: Option<FailLevel>,
+}
+
+#[derive(clap::Args)]
+struct DeviceShellArgs {
+    /// The shell command to run (e.g. "getprop ro.build.version.sdk")
+    #[arg(required = true, num_args = 1..)]
+    command: Vec<String>,
+    /// Path to a custom ADB private key (default: ~/.android/adbkey)
+    #[arg(long = "adb-key")]
+    adb_key: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -102,6 +137,9 @@ struct DeviceScanArgs {
     /// Print the proof/evidence under each finding
     #[arg(long)]
     detail: bool,
+    /// Skip on-device runtime enrichment (granted permissions, app-ops, installer)
+    #[arg(long = "no-runtime")]
+    no_runtime: bool,
     /// Exit with code 1 if any finding at this severity or above (for CI/CD)
     #[arg(long = "fail-on", value_enum)]
     fail_on: Option<FailLevel>,
@@ -156,9 +194,147 @@ fn main() -> ExitCode {
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
+            DeviceAction::Posture(a) => run_device_posture(a),
             DeviceAction::Dump(a) => run_device_dump(a),
             DeviceAction::Scan(a) => run_device_scan(a),
+            DeviceAction::Shell(a) => run_device_shell(a),
         },
+    }
+}
+
+fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
+    use models::{security_score, severity_counts, Severity};
+    use serde_json::{json, Value};
+
+    let mut phone = match device::Phone::connect(args.adb_key) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+
+    let posture = match adb_checks::collect_posture(&mut phone) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+
+    // Sort most-severe first for display.
+    let mut findings = posture.findings;
+    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+
+    if !args.json_output || args.detail {
+        // Header.
+        let label = posture
+            .info
+            .rows
+            .iter()
+            .find(|(k, _)| *k == "model")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "device".into());
+        print_header(&format!("Device posture — {label}"), "device");
+
+        // Device info block.
+        println!("\x1b[1m\x1b[36mDevice\x1b[0m");
+        for (k, v) in &posture.info.rows {
+            if !v.is_empty() {
+                println!("  \x1b[1m{k:<18}\x1b[0m {v}");
+            }
+        }
+        println!();
+
+        if findings.is_empty() {
+            println!("  \x1b[32mNo posture issues detected.\x1b[0m\n");
+        }
+        for f in &findings {
+            print_finding(f, args.detail);
+        }
+
+        // Summary + score (mirrors the package-scan summary).
+        println!();
+        println!("\x1b[1mSummary\x1b[0m");
+        let counts = severity_counts(&findings);
+        for sev in Severity::ALL {
+            let n = counts.get(sev.value()).and_then(|v| v.as_u64()).unwrap_or(0);
+            let label = sev.value().to_uppercase();
+            if n > 0 {
+                println!("  \x1b[{}m{:<10}\x1b[0m \x1b[{}m{:>6}\x1b[0m", sev.ansi(), label, sev.ansi(), n);
+            } else {
+                println!("  \x1b[2m{label:<10}\x1b[0m \x1b[2m{n:>6}\x1b[0m");
+            }
+        }
+        let score = security_score(&findings);
+        let color = if score >= 80 { "32" } else if score >= 50 { "33" } else { "31" };
+        println!("\n\x1b[1mPosture Score:\x1b[0m \x1b[1m\x1b[{color}m{score}/100\x1b[0m");
+        if posture.rooted {
+            println!("\x1b[2mNote: root/verified-boot signals are property-based and best-effort (spoofable).\x1b[0m");
+        }
+        println!();
+    }
+
+    if args.json_output {
+        let info: serde_json::Map<String, Value> = posture
+            .info
+            .rows
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| ((*k).to_string(), json!(v)))
+            .collect();
+        let report = json!({
+            "schema_version": 1,
+            "kind": "device_posture",
+            "device": info,
+            "rooted": posture.rooted,
+            "posture_score": security_score(&findings),
+            "summary": severity_counts(&findings),
+            "findings": findings.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
+        });
+        let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+        if let Some(path) = &args.output {
+            if let Err(e) = std::fs::write(path, &text) {
+                eprintln!("\x1b[31mError writing JSON: {e}\x1b[0m");
+                return ExitCode::from(1);
+            }
+            println!("\x1b[32mJSON report: {}\x1b[0m", path.display());
+        } else if !args.detail {
+            println!("{text}");
+        }
+    }
+
+    // CI gate.
+    if let Some(fail_on) = args.fail_on {
+        let idx = SEVERITY_ORDER.iter().position(|&s| s == fail_on.as_str()).unwrap_or(0);
+        let failing: std::collections::HashSet<&str> =
+            SEVERITY_ORDER[..=idx].iter().copied().collect();
+        if findings.iter().any(|f| failing.contains(f.severity.value())) {
+            return ExitCode::from(1);
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn run_device_shell(args: DeviceShellArgs) -> ExitCode {
+    let mut phone = match device::Phone::connect(args.adb_key) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+    let cmd = args.command.join(" ");
+    match phone.run(&cmd) {
+        Ok(out) => {
+            print!("{out}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -510,7 +686,14 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
         }
 
         print_header(&format!("{pkg}  ({remote})"), "apk");
-        let result = scanner::scan(&local, Some(|f: &models::Finding| print_finding(f, detail)));
+        let mut result = scanner::scan::<fn(&models::Finding)>(&local, None);
+        if !args.no_runtime {
+            let rt = adb_checks::runtime_findings(&mut phone, pkg);
+            result.findings.extend(rt);
+        }
+        for f in &result.findings {
+            print_finding(f, detail);
+        }
         print_summary(&result);
         ok += 1;
 
