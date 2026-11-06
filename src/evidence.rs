@@ -24,7 +24,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn alteration_notes() -> Vec<&'static str> {
     vec![
         "Acquisition is LIVE: the device is powered on and USB debugging is authorized. Connecting and running shell commands alters volatile state (spawns shell processes, updates usage statistics and logs).",
-        "APEX issues read-oriented commands (getprop, getenforce, settings get/list, pm list, pm path, dumpsys, cmd, ps, ls, cat /proc/net/*, logcat -d) and file pulls. It installs nothing and changes no setting.",
+        "APEX issues read-oriented commands (getprop, getenforce, settings get/list, pm list, pm path, dumpsys, cmd, ps, ls, cat /proc/net/*, logcat -d, and the read-only getters 1-16 of `service call iphonesubinfo` for IMEI / IMSI / ICCID / line number) and file pulls. It installs nothing and changes no setting.",
         "`device acquire` writes to the device in two places only: `bugreportz` leaves its zip in the shell user's bugreports directory (not deleted), and the screenshot is written to /data/local/tmp/apex_screen.png, pulled, then removed (skip with --no-screenshot / --no-bugreport). Both are visible in audit.jsonl.",
         "Every command issued is recorded in audit.jsonl with a UTC timestamp and the SHA-256 of its raw output; acquired files are hashed on pull.",
         "This is NOT a forensic image: it does not capture app-private data (/data/data), deleted content, or a physical/file-system image. Use a validated acquisition tool for evidential imaging.",
@@ -51,13 +51,43 @@ pub fn write_offline_evidence(
     report_paths: &[PathBuf],
     case: Value,
 ) -> Result<(PathBuf, String), String> {
+    write_bundle(dir, "offline_analyze", offline_notes(), source, started_utc, inputs, report_paths, case)
+}
+
+/// What `apex import` does to (and derives from) an extraction.
+fn import_notes() -> Vec<&'static str> {
+    vec![
+        "Import of an existing full file-system extraction: no device was contacted. The extraction is only read; every source file used is listed in `inputs` with its SHA-256.",
+        "The files under device/ are derived from the extraction (system XML in text or ABX form, SQLite account databases opened from a temporary copy, build and persistent properties), rewritten in the text format APEX's analysers read. They are listed in `reports` with their SHA-256. APKs under apps/ are byte-for-byte copies.",
+        "Stored Wi-Fi passwords are not copied. Notification, SMS, call and contact databases are not read.",
+        "File times in the storage listings come from the archive metadata, which depends on the extraction tool.",
+    ]
+}
+
+/// Evidence bundle for `apex import`.
+pub fn write_import_evidence(dir: &Path, source: &str, started_utc: &str, inputs: Vec<Value>, produced: &[PathBuf], case: Value) -> Result<(PathBuf, String), String> {
+    write_bundle(dir, "ffs_import", import_notes(), source, started_utc, inputs, produced, case)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_bundle(
+    dir: &Path,
+    operation: &str,
+    notes: Vec<&'static str>,
+    source: &str,
+    started_utc: &str,
+    inputs: Vec<Value>,
+    report_paths: &[PathBuf],
+    case: Value,
+) -> Result<(PathBuf, String), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
     let mut reports = Vec::new();
     for p in report_paths {
         let bytes = std::fs::read(p).map_err(|e| format!("cannot read report {}: {e}", p.display()))?;
+        let name = p.strip_prefix(dir).ok().map(|r| r.to_string_lossy().into_owned());
         reports.push(json!({
-            "file": p.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
+            "file": name.unwrap_or_else(|| p.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string()),
             "sha256": sha256_hex(&bytes),
             "bytes": bytes.len(),
         }));
@@ -66,7 +96,7 @@ pub fn write_offline_evidence(
     let mut manifest = Map::new();
     manifest.insert("schema_version".into(), json!(1));
     manifest.insert("kind".into(), json!("apex_evidence_manifest"));
-    manifest.insert("operation".into(), json!("offline_analyze"));
+    manifest.insert("operation".into(), json!(operation));
     manifest.insert(
         "tool".into(),
         json!({ "name": "apex", "version": env!("CARGO_PKG_VERSION") }),
@@ -81,7 +111,7 @@ pub fn write_offline_evidence(
         }),
     );
     manifest.insert("case".into(), case);
-    manifest.insert("methodology".into(), json!(offline_notes()));
+    manifest.insert("methodology".into(), json!(notes));
     manifest.insert("inputs".into(), json!(inputs));
     manifest.insert("reports".into(), json!(reports));
 

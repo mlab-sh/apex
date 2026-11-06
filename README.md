@@ -14,6 +14,10 @@ Android security analysis and phone investigation, in one self-contained binary.
   install / uninstall and traffic history, a unified timeline, a diff between
   two acquisitions, an HTML case report, and a verifiable chain-of-custody
   bundle.
+- **Seized phones**: remote-wipe alert on connection, an identifiers sheet for
+  legal requests (IMEI, IMSI, ICCID, line number, MACs, accounts), and import
+  of full file-system extractions made by lab tools, so phones APEX cannot
+  connect to (locked, broken) get the same analysis.
 
 ## Install
 
@@ -56,6 +60,56 @@ apex verify ./case-42                                    # 5. integrity check
 `stalkerware.stix2` is Echap's
 [`generated/stalkerware.stix2`](https://github.com/AssoEchap/stalkerware-indicators/tree/master/generated);
 any STIX 2.x indicator bundle works (MVT / Amnesty, your own).
+
+## Seized phones
+
+**Remote wipe.** `device acquire`, `posture` and `scan` check first, before
+anything slow, whether the phone can be erased remotely: a find-my-device
+service with its account signed in (Google, Xiaomi, Samsung, Huawei, OPPO /
+OnePlus), an MDM device or profile owner, an active device admin. They print a
+red alert and say whether the phone is online, so it can be isolated
+(airplane mode, Faraday bag) at once. The same check is a finding,
+`CASE_REMOTE_WIPE`, in offline analysis.
+
+**Identifiers for legal requests.**
+
+```sh
+apex identifiers ./case-42          # terminal sheet
+apex identifiers ./case-42 --json -o identifiers.json
+```
+
+Device (manufacturer, model, name, serial, Android ID, build), telephony
+(IMEI, IMSI, ICCID, line number, SIM and network operator), network (factory
+Wi-Fi MAC, Bluetooth MAC and name), and every account on the phone with the
+service a request goes to (Google, WhatsApp, Instagram / Threads user IDs,
+Telegram, Samsung, Xiaomi…). Telephony identifiers come from the read-only
+getters of `service call iphonesubinfo`, classified host-side (Luhn check for
+IMEI, SIM MCC/MNC prefix for IMSI). The sheet is also in the HTML report.
+
+**Full file-system extractions.** A locked, broken or switched-off phone is
+extracted with a lab tool under the appropriate legal authority; APEX does not
+bypass locks. `apex import` turns that extraction into an APEX case:
+
+```sh
+apex import ./extraction.zip -o ./case-42 --case-id 2026-042 --examiner "J. Doe"
+apex analyze ./case-42 && apex timeline ./case-42 && apex report ./case-42
+```
+
+It accepts a directory, `.zip`, `.tar` or `.tar.gz`, finds the Android root
+(`data/system/packages.xml`) whatever the prefix, and reads system XML in
+text or binary form (ABX, Android 12+). From the extraction it rebuilds:
+packages with installer, install / update times and system flag; users, work
+profile and per-user apps; settings; accounts (`accounts_ce.db` /
+`accounts_de.db`); device admins and owners; the package manager log
+(uninstalls and who did them); saved Wi-Fi networks (names and security, never
+passwords); Bluetooth adapter and paired devices; time zone and build
+properties; file listings of `/data/local/tmp` and shared storage; and every
+APK under `data/app`. The extraction is only read; each source file used is
+hashed into the manifest, and each file produced too, so `apex verify` works.
+
+Not read from an extraction yet: app-ops and usage-stats history (binary
+formats), network statistics, and communications databases. Accounts need an
+after-first-unlock extraction (they are credential-encrypted).
 
 ## Connecting a phone
 
@@ -131,6 +185,8 @@ case-42/
     net_sockets.txt        /proc/net/{tcp,tcp6,udp,udp6}
     local_tmp.txt          ls -laR /data/local/tmp
     screen.png             screenshot at acquisition time
+    accounts.txt, device_policy.txt, connectivity.txt   read first, for the remote-wipe alert
+    iphonesubinfo.txt      IMEI / IMSI / ICCID / line number (read-only getters)
     getprop.txt, identifiers.json
     packages.txt           pm list packages -f -i -u (path, installer)
     packages_{3,system,uid}.txt
@@ -145,7 +201,7 @@ case-42/
     activity_{services,recents,broadcasts}.txt, dbinfo.txt,
     notification.txt, jobscheduler.txt, alarm.txt, role.txt, input_method.txt,
     connectivity.txt, vpn_management.txt, camera.txt, audio.txt, location.txt,
-    accounts.txt, wifi.txt, wifi_networks.txt, bluetooth.txt, device_policy.txt
+    wifi.txt, wifi_networks.txt, bluetooth.txt
     sdcard_listing.txt     ls -laR of shared storage (metadata only)
     bugreport.zip          full dumpstate: every dumpsys, tombstones, ANRs, battery history
   apps/<pkg>/              base.apk + every split APK, dumpsys_package.txt
@@ -215,6 +271,7 @@ and report.
 | `CASE_APPS_REMOVED` | Every app uninstalled and no longer on the phone, with date and caller |
 | `CASE_FIRST_BOOT` | When the phone was set up or last factory reset: nothing older survives |
 | `CASE_NET_USAGE` | Traffic per user app (received / sent) over the period the system keeps |
+| `CASE_REMOTE_WIPE` | A find-my-device service, an MDM or a device admin can erase the phone remotely |
 | `CASE_BACKGROUND_UPLOAD` | A user app sent more than 20 MB in the background, more than it received |
 
 Install and uninstall history comes from the package manager log

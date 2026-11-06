@@ -461,6 +461,7 @@ impl Case {
         let (p1, net_hits) = crate::artifacts::findings(self, iocs);
         out.extend(p1);
         out.extend(crate::history::findings(self, iocs));
+        out.extend(crate::seizure::wipe_finding(self));
         let mut hits = iocs.scan_dir(&self.root, &self.package_names());
         hits.extend(net_hits);
         out.extend(ioc_findings(&hits));

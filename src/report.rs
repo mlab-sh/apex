@@ -82,7 +82,11 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
         }
     }
     let session = &manifest["session"];
-    kv.push(("Acquired (UTC)", esc(&format!("{} → {}", session["started_utc"].as_str().unwrap_or("?"), session["ended_utc"].as_str().unwrap_or("?")))));
+    let imported = manifest["operation"] == "ffs_import";
+    if imported {
+        kv.push(("Source extraction", esc(manifest["session"]["source"].as_str().unwrap_or("?"))));
+    }
+    kv.push((if imported { "Imported (UTC)" } else { "Acquired (UTC)" }, esc(&format!("{} → {}", session["started_utc"].as_str().unwrap_or("?"), session["ended_utc"].as_str().unwrap_or("?")))));
     kv.push(("Device clock at capture", esc(&format!("{} {}", case.capture_local.map(|t| t.to_string()).unwrap_or("?".into()), case.utc_offset.as_deref().unwrap_or("")))));
     if let Some(s) = case.clock_skew_s {
         kv.push(("Clock skew vs examiner", format!("{s} s")));
@@ -97,6 +101,19 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
     h.push_str("<h2>Case and acquisition</h2><table class=\"kv\">");
     for (k, v) in kv {
         let _ = write!(h, "<tr><th>{k}</th><td>{v}</td></tr>");
+    }
+    h.push_str("</table>");
+
+    // --- Identifiers for legal requests.
+    let idv = crate::seizure::identifiers(case);
+    h.push_str("<h2>Identifiers for legal requests</h2><table class=\"kv\">");
+    for key in ["device", "telephony", "network"] {
+        for (k, v) in idv[key].as_object().into_iter().flatten() {
+            let _ = write!(h, "<tr><th>{}</th><td>{}</td></tr>", esc(&k.replace('_', " ")), esc(&val(v)));
+        }
+    }
+    for a in idv["accounts"].as_array().into_iter().flatten() {
+        let _ = write!(h, "<tr><th>{}</th><td>{}</td></tr>", esc(a["service"].as_str().unwrap_or("")), esc(a["name"].as_str().unwrap_or("")));
     }
     h.push_str("</table>");
 

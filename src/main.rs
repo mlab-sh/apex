@@ -1,6 +1,7 @@
 //! APEX CLI entry point — `apex scan path/to/apk`.
 
 mod adb_checks;
+mod abx;
 mod analyzers;
 mod artifacts;
 mod case;
@@ -10,11 +11,13 @@ mod diff;
 mod elf_util;
 mod evidence;
 mod history;
+mod import;
 mod ioc;
 mod models;
 mod output;
 mod report;
 mod scanner;
+mod seizure;
 mod stalkerware_iocs;
 mod util;
 mod verify;
@@ -55,6 +58,33 @@ enum Command {
     Diff(DiffArgs),
     /// Write a self-contained HTML case report from a `device acquire` case
     Report(ReportArgs),
+    /// Identifiers for legal requests (IMEI, IMSI, ICCID, line, MACs, accounts)
+    Identifiers(IdentifiersArgs),
+    /// Turn a full file-system extraction (dir, .zip, .tar, .tar.gz) into an APEX case
+    Import(ImportArgs),
+}
+
+#[derive(clap::Args)]
+struct ImportArgs {
+    /// Extraction: directory, .zip, .tar or .tar.gz containing data/system/…
+    source: PathBuf,
+    /// Case directory to create
+    #[arg(short = 'o', long = "output")]
+    output: PathBuf,
+    #[command(flatten)]
+    case: CaseMetaArgs,
+}
+
+#[derive(clap::Args)]
+struct IdentifiersArgs {
+    /// Case directory written by `apex device acquire` (or `apex import`)
+    case: PathBuf,
+    /// Emit JSON (to -o, or stdout)
+    #[arg(long = "json")]
+    json_output: bool,
+    /// JSON output file
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -372,6 +402,8 @@ fn main() -> ExitCode {
         Command::Timeline(args) => run_timeline(args),
         Command::Diff(args) => run_diff(args),
         Command::Report(args) => run_report(args),
+        Command::Identifiers(args) => run_identifiers(args),
+        Command::Import(args) => run_import(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -395,6 +427,7 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    live_wipe_alert(&mut phone);
 
     let posture = match adb_checks::collect_posture(&mut phone) {
         Ok(p) => p,
@@ -529,6 +562,23 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
 
 /// Run a shell command, save its stdout to `path`, and record the file as a
 /// hashed collected-artifact for the evidence manifest.
+/// Remote-wipe check right after connecting, before anything slow.
+fn live_wipe_alert(phone: &mut device::Phone) {
+    let mut run = |c: &str| phone.run(c).unwrap_or_default();
+    let (acc, dp, conn, pk, air) = (
+        run("dumpsys account"),
+        run("dumpsys device_policy"),
+        run("dumpsys connectivity"),
+        run("pm list packages"),
+        run("settings get global airplane_mode_on"),
+    );
+    let pkgs = case::parse_packages(&pk).into_iter().map(|p| p.name).collect();
+    let (why, online) = seizure::wipe_risks(&acc, &pkgs, &dp, &conn, Some(air.trim() == "1"));
+    if let Some(b) = seizure::wipe_banner(&why, online) {
+        eprint!("{b}");
+    }
+}
+
 fn acquire_save(
     phone: &mut device::Phone,
     cmd: &str,
@@ -588,6 +638,19 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     println!("\x1b[2m  device metadata…\x1b[0m");
     // First, so the device clock is read right next to the host timestamp in the audit log.
     acquire_save(&mut phone, "date '+%Y-%m-%dT%H:%M:%S%z'", &device_dir.join("clock.txt"), &out, &mut collected);
+    // Can the phone be wiped remotely? Say so before anything slow.
+    acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys device_policy", &device_dir.join("device_policy.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys connectivity", &device_dir.join("connectivity.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "pm list packages -f -i -u", &device_dir.join("packages.txt"), &out, &mut collected);
+    {
+        let rd = |f: &str| std::fs::read_to_string(device_dir.join(f)).unwrap_or_default();
+        let pkgs = case::parse_packages(&rd("packages.txt")).into_iter().map(|p| p.name).collect();
+        let (why, online) = seizure::wipe_risks(&rd("accounts.txt"), &pkgs, &rd("device_policy.txt"), &rd("connectivity.txt"), None);
+        if let Some(b) = seizure::wipe_banner(&why, online) {
+            eprint!("{b}");
+        }
+    }
     // Volatile state next, before our own activity adds processes, sockets or files.
     acquire_save(&mut phone, "ps -A -o USER,PID,PPID,NAME,ARGS", &device_dir.join("processes.txt"), &out, &mut collected);
     acquire_save(&mut phone, "ls -l /proc/[0-9]*/exe 2>/dev/null", &device_dir.join("proc_exe.txt"), &out, &mut collected);
@@ -604,7 +667,6 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         }
     }
     acquire_save(&mut phone, "getprop", &device_dir.join("getprop.txt"), &out, &mut collected);
-    acquire_save(&mut phone, "pm list packages -f -i -u", &device_dir.join("packages.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -3", &device_dir.join("packages_3.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -s -u", &device_dir.join("packages_system.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -U", &device_dir.join("packages_uid.txt"), &out, &mut collected);
@@ -622,10 +684,18 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             }
         }
     }
-    acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
-    acquire_save(&mut phone, "dumpsys device_policy", &device_dir.join("device_policy.txt"), &out, &mut collected);
+    // Telephony identifiers for legal requests (IMEI, IMSI, ICCID, line number):
+    // read-only getters of `iphonesubinfo`, numbered differently per Android
+    // version, so call the first ones with both signatures and classify host-side.
+    acquire_save(
+        &mut phone,
+        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do for a in 's16 com.android.shell' 'i32 0 s16 com.android.shell s16 null' 'i32 1 s16 com.android.shell s16 null'; do echo \"## $i $a\"; service call iphonesubinfo $i $a; done; done",
+        &device_dir.join("iphonesubinfo.txt"),
+        &out,
+        &mut collected,
+    );
     // Investigation inputs: permission use history, hidden apps, enabled services.
     acquire_save(&mut phone, "dumpsys appops", &device_dir.join("appops.txt"), &out, &mut collected);
     acquire_save(
@@ -653,7 +723,6 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         ("dumpsys alarm", "alarm.txt"),
         ("dumpsys role", "role.txt"),
         ("dumpsys input_method", "input_method.txt"),
-        ("dumpsys connectivity", "connectivity.txt"),
         ("dumpsys vpn_management", "vpn_management.txt"),
         ("dumpsys media.camera", "camera.txt"),
         ("dumpsys media.audio_flinger", "audio.txt"),
@@ -1256,6 +1325,56 @@ fn run_diff(args: DiffArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_import(args: ImportArgs) -> ExitCode {
+    if args.output.join("manifest.json").exists() {
+        eprintln!("\x1b[31m{} already holds a case: pick a new directory\x1b[0m", args.output.display());
+        return ExitCode::from(1);
+    }
+    println!("\x1b[1m\x1b[36mImporting {} → {}\x1b[0m", args.source.display(), args.output.display());
+    match import::import(&args.source, &args.output, args.case.to_json()) {
+        Ok(s) => {
+            println!(
+                "\x1b[32m✓ {} package(s), {} user-installed, {} APK(s), {} user(s)\x1b[0m  \x1b[2m(extraction root: /{})\x1b[0m",
+                s.packages, s.third_party, s.apks, s.users, s.root_prefix
+            );
+            println!("\x1b[2m  {} file(s) written, hashed in manifest.json\x1b[0m", s.produced.len());
+            for m in &s.missing {
+                println!("\x1b[33m  not in this extraction: {m}\x1b[0m");
+            }
+            println!("\x1b[2m  next: apex analyze {0} · apex timeline {0} · apex identifiers {0} · apex report {0}\x1b[0m", args.output.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_identifiers(args: IdentifiersArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case (no device/packages.txt)\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let v = seizure::identifiers(&case::Case::load(&args.case));
+    if args.json_output || args.output.is_some() {
+        let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+        match &args.output {
+            Some(p) => {
+                if let Err(e) = std::fs::write(p, text) {
+                    eprintln!("\x1b[31mcannot write {}: {e}\x1b[0m", p.display());
+                    return ExitCode::from(1);
+                }
+                println!("\x1b[32m✓ Identifiers → {}\x1b[0m", p.display());
+            }
+            None => println!("{text}"),
+        }
+    } else {
+        seizure::print_identifiers(&v);
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_report(args: ReportArgs) -> ExitCode {
     if !case::Case::is_case(&args.case) {
         eprintln!("\x1b[31m{} is not a `device acquire` case (no device/packages.txt)\x1b[0m", args.case.display());
@@ -1527,6 +1646,7 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    live_wipe_alert(&mut phone);
 
     // For an evidence run, reports must land on disk to be hashed.
     let evidence_dir = args.evidence.clone();

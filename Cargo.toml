@@ -33,6 +33,9 @@ rsa = "0.9"
 unicode-width = "0.1"
 adb_client = { version = "3.2.2", default-features = false, features = ["usb"] }
 rusb = "0.9"
+flate2 = "1"
+tar = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3
