@@ -4,6 +4,7 @@ mod adb_checks;
 mod abx;
 mod analyzers;
 mod artifacts;
+mod backup;
 mod case;
 mod comms;
 mod cert_util;
@@ -17,11 +18,14 @@ mod ioc;
 mod media;
 mod models;
 mod output;
+mod pv;
 mod report;
 mod scanner;
 mod sqlite_carve;
+mod search;
 mod seizure;
 mod stalkerware_iocs;
+mod tsa;
 mod util;
 mod verify;
 mod xml;
@@ -69,6 +73,63 @@ enum Command {
     Comms(CommsArgs),
     /// Inventory shared-storage media: hashes, EXIF / GPS, hash sets, KML
     Media(MediaArgs),
+    /// Search a whole case (keywords / regex) and extract entities
+    Search(SearchArgs),
+    /// RFC 3161 trusted timestamp of a case manifest (sends only its SHA-256)
+    Seal(SealArgs),
+    /// French procès-verbal de constatations for one or several exhibits (HTML)
+    Pv(PvArgs),
+}
+
+#[derive(clap::Args)]
+struct SealArgs {
+    /// Case directory
+    case: PathBuf,
+    /// Time-Stamping Authority URL, e.g. https://freetsa.org/tsr
+    #[arg(long)]
+    tsa: String,
+}
+
+#[derive(clap::Args)]
+struct PvArgs {
+    /// Case directories, one per exhibit (seal)
+    #[arg(required = true)]
+    cases: Vec<PathBuf>,
+    /// Service / unit, e.g. "Brigade de recherches de …"
+    #[arg(long)]
+    service: Option<String>,
+    /// Officer writing the PV (default: --examiner of the first case)
+    #[arg(long)]
+    officer: Option<String>,
+    /// Place of the operations
+    #[arg(long)]
+    place: Option<String>,
+    /// STIX2 indicator bundle (repeatable)
+    #[arg(long = "iocs")]
+    iocs: Vec<PathBuf>,
+    /// Alert hash set (repeatable)
+    #[arg(long = "hashes")]
+    hashes: Vec<PathBuf>,
+    /// Output HTML file (default: ./pv.html)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct SearchArgs {
+    /// Case directory
+    case: PathBuf,
+    /// Words or phrases to find (case-insensitive); several = any of them
+    patterns: Vec<String>,
+    /// Treat patterns as regular expressions
+    #[arg(long)]
+    regex: bool,
+    /// Extract entities: phones, e-mails, IBANs, Bitcoin / Ethereum addresses, @handles
+    #[arg(long)]
+    entities: bool,
+    /// Write hits / entities as CSV into this directory (default: <case>_search)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -285,12 +346,15 @@ struct CaseMetaArgs {
     /// Free-text note (legal basis, context, chain of custody)
     #[arg(long = "case-notes")]
     case_notes: Option<String>,
+    /// Seal (exhibit) number of this phone, e.g. "SCELLÉ N°3"
+    #[arg(long)]
+    seal: Option<String>,
 }
 
 impl CaseMetaArgs {
     fn to_json(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();
-        for (k, v) in [("case_id", &self.case_id), ("examiner", &self.examiner), ("notes", &self.case_notes)] {
+        for (k, v) in [("case_id", &self.case_id), ("examiner", &self.examiner), ("notes", &self.case_notes), ("seal", &self.seal)] {
             if let Some(v) = v {
                 m.insert(k.into(), serde_json::json!(v));
             }
@@ -356,6 +420,10 @@ struct DeviceAcquireArgs {
     /// Pull shared storage (photos, videos, downloads, messaging media)
     #[arg(long)]
     storage: bool,
+    /// Android backup (`bu backup -all -noapk`) of the apps that allow it;
+    /// confirm on the phone with an EMPTY password
+    #[arg(long)]
+    backup: bool,
     #[command(flatten)]
     conn: ConnArgs,
 }
@@ -460,6 +528,9 @@ fn main() -> ExitCode {
         Command::Import(args) => run_import(args),
         Command::Comms(args) => run_comms(args),
         Command::Media(args) => run_media(args),
+        Command::Search(args) => run_search(args),
+        Command::Seal(args) => run_seal(args),
+        Command::Pv(args) => run_pv(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -694,6 +765,8 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     println!("\x1b[2m  device metadata…\x1b[0m");
     // First, so the device clock is read right next to the host timestamp in the audit log.
     acquire_save(&mut phone, "date '+%Y-%m-%dT%H:%M:%S%z'", &device_dir.join("clock.txt"), &out, &mut collected);
+    // State at reception (for the report): battery, charging.
+    acquire_save(&mut phone, "dumpsys battery", &device_dir.join("battery.txt"), &out, &mut collected);
     // Can the phone be wiped remotely? Say so before anything slow.
     acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys device_policy", &device_dir.join("device_policy.txt"), &out, &mut collected);
@@ -804,6 +877,19 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
                     collected.push(json!({"file": p.strip_prefix(&out).unwrap_or(&p).to_string_lossy(), "sha256": scanner::compute_hash(&p).unwrap_or_default(), "bytes": b.len(), "source_cmd": format!("content read --uri content://mms/part/{id}")}));
                 }
             }
+        }
+    }
+    if args.backup {
+        println!("\x1b[2m  Android backup…\x1b[0m");
+        match backup::run(&mut phone, &out).and_then(|ab| backup::extract(&ab, &out, args.mandate.is_some())) {
+            Ok(files) => {
+                for rel in &files {
+                    let p = out.join(rel);
+                    collected.push(json!({"file": rel, "sha256": scanner::compute_hash(&p).unwrap_or_default(), "bytes": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "source_cmd": "bu backup -all -noapk (unpacked)"}));
+                }
+                println!("\x1b[2m  backup: {} file(s) unpacked\x1b[0m", files.len());
+            }
+            Err(e) => eprintln!("\x1b[33m[warn] backup: {e}\x1b[0m"),
         }
     }
     if args.storage {
@@ -1332,8 +1418,32 @@ fn run_verify(args: VerifyArgs) -> ExitCode {
         }
     }
 
+    // RFC 3161 timestamp, when the case was sealed.
+    let dir = if args.path.is_dir() { args.path.clone() } else { args.path.parent().map(Path::to_path_buf).unwrap_or_default() };
+    let mut ts_ok = true;
+    match tsa::check(&dir) {
+        Some(Ok(t)) => println!(
+            "  \x1b[32m✓ RFC 3161 timestamp {} (UTC) by {} matches the manifest{}\x1b[0m",
+            t.gen_time,
+            t.tsa,
+            match t.signature_ok {
+                Some(true) => ", token signature verified",
+                Some(false) => ", but the token signature is INVALID",
+                None => " (token signature not checked: unsupported algorithm)",
+            }
+        ),
+        Some(Err(e)) => {
+            ts_ok = false;
+            println!("  \x1b[91m✗ RFC 3161 timestamp: {e}\x1b[0m");
+        }
+        None => {}
+    }
+    if matches!(tsa::check(&dir), Some(Ok(ref t)) if t.signature_ok == Some(false)) {
+        ts_ok = false;
+    }
+
     println!();
-    if report.passed() {
+    if report.passed() && ts_ok {
         println!("\x1b[1m\x1b[32mBundle integrity: VERIFIED\x1b[0m\n");
         ExitCode::SUCCESS
     } else {
@@ -1456,6 +1566,112 @@ fn run_comms(args: CommsArgs) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn run_seal(args: SealArgs) -> ExitCode {
+    if !args.case.join("manifest.json").is_file() {
+        eprintln!("\x1b[31m{} has no manifest.json\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    println!("\x1b[2mSending the SHA-256 of manifest.json to {} (nothing else leaves this machine)…\x1b[0m", args.tsa);
+    match tsa::seal(&args.case, &args.tsa) {
+        Ok(t) => {
+            println!("\x1b[32m✓ Timestamped {} (UTC) by {}\x1b[0m", t.gen_time, t.tsa);
+            match t.signature_ok {
+                Some(true) => println!("\x1b[32m  token signature verified\x1b[0m"),
+                Some(false) => println!("\x1b[31m  token signature INVALID\x1b[0m"),
+                None => println!("\x1b[33m  token signature not checked by APEX (unsupported algorithm)\x1b[0m"),
+            }
+            println!("\x1b[2m  {0}/manifest.json.tsr — full chain check: openssl ts -verify -in {0}/manifest.json.tsr -data {0}/manifest.json -CAfile <TSA CA bundle>\x1b[0m", args.case.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_pv(args: PvArgs) -> ExitCode {
+    for c in &args.cases {
+        if !case::Case::is_case(c) {
+            eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", c.display());
+            return ExitCode::from(1);
+        }
+    }
+    let Some(mut iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    if let Err(e) = media::load_alert_hashsets(&mut iocs, &args.hashes) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let cases: Vec<&Path> = args.cases.iter().map(PathBuf::as_path).collect();
+    let html = pv::render(&cases, &pv::Header { service: args.service, officer: args.officer, place: args.place }, &iocs);
+    let out = args.output.unwrap_or_else(|| PathBuf::from("pv.html"));
+    if let Err(e) = std::fs::write(&out, html) {
+        eprintln!("\x1b[31mcannot write {}: {e}\x1b[0m", out.display());
+        return ExitCode::from(1);
+    }
+    println!("\x1b[32m✓ Procès-verbal ({} pièce(s)) → {}\x1b[0m", cases.len(), out.display());
+    ExitCode::SUCCESS
+}
+
+fn run_search(args: SearchArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    if args.patterns.is_empty() && !args.entities {
+        eprintln!("\x1b[33mGive words to search for, or --entities.\x1b[0m");
+        return ExitCode::from(2);
+    }
+    let c = case::Case::load(&args.case);
+    let srcs = search::sources(&c);
+    let dir = args.output.clone().unwrap_or_else(|| sibling(&args.case, "search"));
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    if !args.patterns.is_empty() {
+        let hits = match search::search(&srcs, &args.patterns, args.regex) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+                return ExitCode::from(2);
+            }
+        };
+        let mut last = String::new();
+        for h in hits.iter().take(500) {
+            if h.source != last {
+                println!("\n\x1b[1m{}\x1b[0m", h.source);
+                last = h.source.clone();
+            }
+            println!("  \x1b[2m{:>6}\x1b[0m  {}", h.line, h.text);
+        }
+        println!("\n\x1b[32m{} matching line(s) in {} source(s)\x1b[0m{}", hits.len(), hits.iter().map(|h| &h.source).collect::<std::collections::BTreeSet<_>>().len(), if hits.len() > 500 { " (first 500 shown; all in hits.csv)" } else { "" });
+        let _ = std::fs::create_dir_all(&dir);
+        let csv: String = std::iter::once("source,line,text\n".to_string()).chain(hits.iter().map(|h| format!("{},{},{}\n", q(&h.source), h.line, q(&h.text)))).collect();
+        if std::fs::write(dir.join("hits.csv"), csv).is_ok() {
+            println!("\x1b[32m✓ {}\x1b[0m", dir.join("hits.csv").display());
+        }
+    }
+    if args.entities {
+        let ents = search::extract(&srcs);
+        println!("\n\x1b[1mEntities\x1b[0m");
+        let mut csv = String::from("kind,value,count,sources\n");
+        for (kind, vals) in &ents {
+            let mut v: Vec<_> = vals.iter().collect();
+            v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
+            println!("  \x1b[36m{kind}\x1b[0m ({})", v.len());
+            for (val, (n, src)) in v.iter().take(10) {
+                println!("    {val:<44} {n:>5}  \x1b[2m{}\x1b[0m", src.iter().take(3).cloned().collect::<Vec<_>>().join(", "));
+            }
+            for (val, (n, src)) in v {
+                csv.push_str(&format!("{kind},{},{n},{}\n", q(val), q(&src.join("; "))));
+            }
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        if std::fs::write(dir.join("entities.csv"), csv).is_ok() {
+            println!("\x1b[32m✓ {}\x1b[0m", dir.join("entities.csv").display());
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_media(args: MediaArgs) -> ExitCode {

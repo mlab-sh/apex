@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 zip = "2"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 sha1 = "0.10"
 md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +37,10 @@ flate2 = "1"
 tar = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 kamadak-exif = "0.6"
+regex = "1"
+ureq = "2"
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
 
 [profile.release]
 opt-level = 3

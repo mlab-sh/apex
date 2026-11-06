@@ -20,6 +20,9 @@ Android security analysis and phone investigation, in one self-contained binary.
   and, under a legal mandate, communications (SMS, MMS, calls, contacts,
   WhatsApp, Telegram, Chrome) with recovery of deleted records, plus media
   with EXIF / GPS, KML maps and hash-set matching (Project VIC / CAID, NSRL).
+- **Procedure**: seal numbers, RFC 3161 trusted timestamps, a French
+  procès-verbal for one or several exhibits, cross-search and entity
+  extraction (phones, e-mails, IBANs, crypto addresses).
 
 ## Install
 
@@ -149,6 +152,13 @@ apex comms ./case-42 -o ./case-42-comms                        # comms.csv + com
 | WhatsApp (messages, media paths, contact names) | no | `msgstore.db` (current and legacy schema), `wa.db` |
 | Telegram | no | `cache4.db` (text extracted from message blobs, best effort) |
 | Chrome history and downloads | no | `History` |
+| Calendar | `content query` | `calendar.db` (incl. events flagged deleted) |
+| Apps that allow Android backup | `--backup` (confirm on the phone, empty password) | — |
+
+`--backup` runs `bu backup -all -noapk` on the phone, asks the examiner to
+confirm on its screen, pulls the archive and unpacks it into `backup/`; under a
+mandate, messaging databases found there are read like an extraction's. Most
+apps targeting Android 12+ opt out of backup, so expect little.
 
 **Deleted records.** Databases are copied with their write-ahead log. APEX
 parses every WAL frame (older page versions included) and the free pages of
@@ -368,6 +378,55 @@ the UTC offset in force at that moment in the phone's time zone, so summer
 and winter times are both right. Writing the timeline inside the case adds a
 file `apex verify` reports as unlisted; use `-o` elsewhere to leave the bundle
 untouched.
+
+## Procedure
+
+**Seal numbers and case metadata.** `--seal "SCELLÉ N°3"` next to
+`--case-id`, `--examiner`, `--case-notes` (and `--mandate`). Acquisitions also
+record the battery level and charging state at reception.
+
+**Trusted timestamp (RFC 3161).**
+
+```sh
+apex seal ./case-42 --tsa https://freetsa.org/tsr
+apex verify ./case-42      # also checks the timestamp
+```
+
+Only the SHA-256 of `manifest.json` is sent to the Time-Stamping Authority.
+The signed token (`manifest.json.tsr`) proves the case existed unchanged at
+that time: `apex verify` fails if the manifest was edited afterwards, even with
+a recomputed `manifest.json.sha256`. APEX checks the token's signature (RSA,
+ECDSA P-256 / P-384) against the signer certificate in the token; for the
+chain to a trusted root, use the `openssl ts -verify` command `seal` prints.
+
+**Procès-verbal.**
+
+```sh
+apex pv ./case-42 ./case-43 --service "Brigade …" --place "Paris" -o pv.html
+```
+
+A French *procès-verbal de constatations*, one section per exhibit: device
+(make, model, serial, IMEI, line, SIM), state at reception (clock and skew,
+battery, airplane mode, Wi-Fi, Bluetooth, network, remote-wipe risk),
+operations (nature, start / end, link, commands issued, mandate, tool
+version), integrity (manifest SHA-256, verification, RFC 3161 timestamp),
+findings of medium severity and above, and communications counts. Every
+statement comes from the hashed case files. Finding titles stay in English.
+
+**Search and entities.**
+
+```sh
+apex search ./case-42 "parking" "rdv"          # any of the words, case-insensitive
+apex search ./case-42 --regex "\b0[67]\d{8}\b"
+apex search ./case-42 --entities -o ./case-42-search
+```
+
+Searches every text artifact, the text of `bugreport.zip`, text files in
+storage and the communications. `--entities` lists phone numbers, e-mail
+addresses, IBANs (mod-97 checked), Bitcoin (Base58Check / Bech32 checked) and
+Ethereum addresses and, in messages, @handles, with counts and sources
+(`entities.csv`). National phone formats and handles are only taken from
+messages and documents, where they are not noise.
 
 ## Diff between two acquisitions
 

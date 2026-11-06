@@ -42,6 +42,7 @@ pub const MMS_COLS: &str = "_id:thread_id:date:msg_box:read:sub";
 pub const PART_COLS: &str = "_id:mid:ct:text:name:cl";
 pub const CALL_COLS: &str = "_id:number:date:duration:type:name:geocoded_location";
 pub const CONTACT_COLS: &str = "display_name:data1";
+pub const CAL_COLS: &str = "_id:title:dtstart:dtend:eventLocation:description:organizer:deleted";
 
 /// Shell commands for a live mandate acquisition: (file, command).
 pub fn live_commands() -> Vec<(&'static str, String)> {
@@ -55,6 +56,7 @@ pub fn live_commands() -> Vec<(&'static str, String)> {
         ),
         ("calls.txt", format!("content query --uri content://call_log/calls --projection {CALL_COLS}")),
         ("contacts.txt", format!("content query --uri content://com.android.contacts/data/phones --projection {CONTACT_COLS}")),
+        ("calendar.txt", format!("content query --uri content://com.android.calendar/events --projection {CAL_COLS}")),
     ]
 }
 
@@ -130,6 +132,19 @@ fn call_dir(t: i64) -> &'static str {
     }
 }
 
+fn calendar_row(start: i64, title: &str, place: &str, desc: &str, organizer: &str, deleted: bool, source: &str) -> Comm {
+    Comm {
+        time_ms: start,
+        kind: "calendar",
+        direction: String::new(),
+        peer: organizer.to_string(),
+        text: [title, desc].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" — "),
+        extra: place.to_string(),
+        source: source.into(),
+        recovered: deleted,
+    }
+}
+
 fn live(dir: &Path) -> Vec<Comm> {
     let rd = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
     let mut out = Vec::new();
@@ -173,6 +188,9 @@ fn live(dir: &Path) -> Vec<Comm> {
             recovered: false,
         });
     }
+    for r in parse_content_query(&rd("calendar.txt"), CAL_COLS) {
+        out.push(calendar_row(n(&r, "dtstart"), &s(&r, "title"), &s(&r, "eventLocation"), &s(&r, "description"), &s(&r, "organizer"), n(&r, "deleted") == 1, "content://com.android.calendar"));
+    }
     for r in parse_content_query(&rd("contacts.txt"), CONTACT_COLS) {
         out.push(Comm { time_ms: 0, kind: "contact", direction: String::new(), peer: s(&r, "data1"), text: s(&r, "display_name"), extra: String::new(), source: "content://com.android.contacts".into(), recovered: false });
     }
@@ -192,6 +210,7 @@ pub const DATABASES: &[(&str, &str)] = &[
     ("data/data/org.telegram.messenger/files/cache4.db", "cache4.db"),
     ("data/data/org.telegram.messenger.web/files/cache4.db", "cache4.db"),
     ("data/data/com.android.chrome/app_chrome/Default/History", "chrome_history.db"),
+    ("data/data/com.android.providers.calendar/databases/calendar.db", "calendar.db"),
 ];
 
 /// MMS attachment files in an extraction.
@@ -538,6 +557,11 @@ pub fn load(case: &Case) -> Vec<Comm> {
     }
     if let Some(d) = open(&db, "chrome_history.db") {
         out.extend(chrome(&d));
+    }
+    if let Some(d) = open(&db, "calendar.db") {
+        out.extend(rows(&d, "SELECT dtstart, title, eventLocation, description, organizer, deleted FROM Events").iter().map(|m| {
+            calendar_row(vi(m, "dtstart"), &vs(m, "title"), &vs(m, "eventLocation"), &vs(m, "description"), &vs(m, "organizer"), vi(m, "deleted") == 1, "calendar.db")
+        }));
     }
     out.sort_by(|a, b| a.time_ms.cmp(&b.time_ms).then(a.kind.cmp(b.kind)));
     out

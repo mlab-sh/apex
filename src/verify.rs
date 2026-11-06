@@ -127,7 +127,7 @@ pub fn verify_bundle(path: &Path) -> Result<VerifyReport, String> {
         }
         let p = e.path();
         let name = p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into_owned();
-        if name == "manifest.json" || name == "manifest.json.sha256" {
+        if name == "manifest.json" || name.starts_with("manifest.json.") {
             continue;
         }
         if let Ok(h) = crate::scanner::compute_hash(p) {
