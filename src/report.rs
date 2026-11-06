@@ -146,6 +146,42 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
         h.push_str("</dl></div></details>");
     }
 
+    // --- Communications (under mandate): counts only, content goes through `apex comms`.
+    let comms = crate::comms::load(case);
+    if !comms.is_empty() {
+        let _ = write!(h, "<h2>Communications (mandate {})</h2><table><tr><th>Kind</th><th>Records</th><th>Recovered (deleted)</th></tr>", esc(manifest["case"]["mandate"].as_str().unwrap_or("not recorded")));
+        for (k, (n, r)) in crate::comms::counts(&comms) {
+            let _ = write!(h, "<tr><td>{}</td><td>{n}</td><td>{r}</td></tr>", esc(&k));
+        }
+        h.push_str("</table><p class=\"mut\">Content is exported separately with <code>apex comms</code> (CSV, JSON).</p>");
+    }
+
+    // --- Media with a location.
+    let files = crate::media::storage_files(case);
+    if !files.is_empty() {
+        let metas = crate::par_map(&files, |p| crate::media::file_meta(p));
+        let located: Vec<(String, crate::media::Meta)> = files
+            .iter()
+            .zip(metas)
+            .filter(|(_, m)| m.lat.is_some() && m.lon.is_some())
+            .map(|(p, m)| (p.strip_prefix(case.root.join("storage")).unwrap_or(p).to_string_lossy().into_owned(), m))
+            .collect();
+        let _ = write!(h, "<h2>Media ({} files, {} with a location)</h2>", files.len(), located.len());
+        if !located.is_empty() {
+            h.push_str("<div class=\"tbl\"><table><tr><th>File</th><th>Taken</th><th>Location</th></tr>");
+            for (rel, m) in located.iter().take(200) {
+                let (la, lo) = (m.lat.unwrap(), m.lon.unwrap());
+                let _ = write!(
+                    h,
+                    "<tr><td>{}</td><td>{}</td><td><a href=\"https://www.openstreetmap.org/?mlat={la:.6}&amp;mlon={lo:.6}#map=17/{la:.6}/{lo:.6}\">{la:.6}, {lo:.6}</a></td></tr>",
+                    esc(rel),
+                    esc(&m.taken.as_deref().map(|t| case.iso(t)).unwrap_or_default())
+                );
+            }
+            h.push_str("</table></div><p class=\"mut\">Full inventory, KML and GeoJSON: <code>apex media</code>.</p>");
+        }
+    }
+
     // --- Apps.
     let traffic = crate::history::traffic_by_package(case);
     let mut apps: Vec<&crate::case::Pkg> = case.packages.iter().filter(|p| case.third_party.contains(&p.name)).collect();

@@ -5,6 +5,7 @@ mod abx;
 mod analyzers;
 mod artifacts;
 mod case;
+mod comms;
 mod cert_util;
 mod device;
 mod diff;
@@ -13,10 +14,12 @@ mod evidence;
 mod history;
 mod import;
 mod ioc;
+mod media;
 mod models;
 mod output;
 mod report;
 mod scanner;
+mod sqlite_carve;
 mod seizure;
 mod stalkerware_iocs;
 mod util;
@@ -62,12 +65,47 @@ enum Command {
     Identifiers(IdentifiersArgs),
     /// Turn a full file-system extraction (dir, .zip, .tar, .tar.gz) into an APEX case
     Import(ImportArgs),
+    /// Export communications collected under mandate (CSV + JSON)
+    Comms(CommsArgs),
+    /// Inventory shared-storage media: hashes, EXIF / GPS, hash sets, KML
+    Media(MediaArgs),
+}
+
+#[derive(clap::Args)]
+struct CommsArgs {
+    /// Case directory (acquired or imported with --mandate)
+    case: PathBuf,
+    /// Output directory (default: <case>_comms)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct MediaArgs {
+    /// Case directory (acquired or imported with --storage)
+    case: PathBuf,
+    /// Known-file hash set to set aside (repeatable), e.g. NSRL
+    #[arg(long = "known")]
+    known: Vec<PathBuf>,
+    /// Alert hash set (repeatable): Project VIC / CAID VICS JSON, or one hash per line
+    #[arg(long = "hashes")]
+    hashes: Vec<PathBuf>,
+    /// Output directory (default: <case>_media)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
 struct ImportArgs {
     /// Extraction: directory, .zip, .tar or .tar.gz containing data/system/…
     source: PathBuf,
+    /// Legal mandate reference: also copy communication databases (SMS / MMS,
+    /// calls, contacts, WhatsApp, Telegram, Chrome). Recorded in the manifest.
+    #[arg(long)]
+    mandate: Option<String>,
+    /// Also copy shared storage (data/media/0: photos, videos, downloads)
+    #[arg(long)]
+    storage: bool,
     /// Case directory to create
     #[arg(short = 'o', long = "output")]
     output: PathBuf,
@@ -111,6 +149,9 @@ struct ReportArgs {
     /// STIX2 indicator bundle to match (repeatable)
     #[arg(long = "iocs")]
     iocs: Vec<PathBuf>,
+    /// Alert hash set (repeatable): Project VIC / CAID VICS JSON, NSRL, or one hash per line
+    #[arg(long = "hashes")]
+    hashes: Vec<PathBuf>,
     /// Output file (default: <case>/report.html)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
@@ -145,6 +186,9 @@ struct AnalyzeArgs {
     /// generated/stalkerware.stix2 or an MVT/Amnesty IOC file
     #[arg(long = "iocs")]
     iocs: Vec<PathBuf>,
+    /// Alert hash set (repeatable): Project VIC / CAID VICS JSON, NSRL, or one hash per line
+    #[arg(long = "hashes")]
+    hashes: Vec<PathBuf>,
     /// Write a JSON report per package
     #[arg(long = "json")]
     json_output: bool,
@@ -302,6 +346,16 @@ struct DeviceAcquireArgs {
     /// redacted dump. Message content is legally sensitive: only with a mandate.
     #[arg(long = "notification-content")]
     notification_content: bool,
+    /// Triage: volatile state, remote-wipe check and identifiers only (< 1 min)
+    #[arg(long)]
+    triage: bool,
+    /// Legal mandate reference: also collect SMS, MMS (+ attachments), call log
+    /// and contacts. Recorded in the manifest.
+    #[arg(long)]
+    mandate: Option<String>,
+    /// Pull shared storage (photos, videos, downloads, messaging media)
+    #[arg(long)]
+    storage: bool,
     #[command(flatten)]
     conn: ConnArgs,
 }
@@ -404,6 +458,8 @@ fn main() -> ExitCode {
         Command::Report(args) => run_report(args),
         Command::Identifiers(args) => run_identifiers(args),
         Command::Import(args) => run_import(args),
+        Command::Comms(args) => run_comms(args),
+        Command::Media(args) => run_media(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -684,8 +740,6 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             }
         }
     }
-    acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
-    acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
     // Telephony identifiers for legal requests (IMEI, IMSI, ICCID, line number):
     // read-only getters of `iphonesubinfo`, numbered differently per Android
     // version, so call the first ones with both signatures and classify host-side.
@@ -696,6 +750,13 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         &out,
         &mut collected,
     );
+    for ns in ["secure", "global", "system"] {
+        acquire_save(&mut phone, &format!("settings list {ns}"), &device_dir.join(format!("settings_{ns}.txt")), &out, &mut collected);
+    }
+
+    if !args.triage {
+    acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
     // Investigation inputs: permission use history, hidden apps, enabled services.
     acquire_save(&mut phone, "dumpsys appops", &device_dir.join("appops.txt"), &out, &mut collected);
     acquire_save(
@@ -705,9 +766,6 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         &out,
         &mut collected,
     );
-    for ns in ["secure", "global", "system"] {
-        acquire_save(&mut phone, &format!("settings list {ns}"), &device_dir.join(format!("settings_{ns}.txt")), &out, &mut collected);
-    }
 
     println!("\x1b[2m  services, roles, network, sensors, storage…\x1b[0m");
     let notif_cmd = if args.notification_content { "dumpsys notification --noredact" } else { "dumpsys notification" };
@@ -732,6 +790,26 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     ] {
         acquire_save(&mut phone, cmd, &device_dir.join(file), &out, &mut collected);
     }
+    if let Some(m) = &args.mandate {
+        println!("\x1b[2m  communications under mandate {m}…\x1b[0m");
+        for (file, cmd) in comms::live_commands() {
+            acquire_save(&mut phone, &cmd, &out.join("comms").join(file), &out, &mut collected);
+        }
+        let parts = std::fs::read_to_string(out.join("comms/mms_part.txt")).unwrap_or_default();
+        for (id, name) in comms::attachment_parts(&parts) {
+            if let Ok(b) = phone.run_raw(&format!("content read --uri content://mms/part/{id}")) {
+                let p = out.join("comms/mms_parts").join(format!("{id}_{name}"));
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                if std::fs::write(&p, &b).is_ok() {
+                    collected.push(json!({"file": p.strip_prefix(&out).unwrap_or(&p).to_string_lossy(), "sha256": scanner::compute_hash(&p).unwrap_or_default(), "bytes": b.len(), "source_cmd": format!("content read --uri content://mms/part/{id}")}));
+                }
+            }
+        }
+    }
+    if args.storage {
+        let (ok, total, failed) = media::pull_storage(&mut phone, &out);
+        println!("\x1b[2m  {ok} file(s) pulled ({:.1} MB){}\x1b[0m", total as f64 / 1_048_576.0, if failed > 0 { format!(", {failed} failed") } else { String::new() });
+    }
     if !args.no_usagestats {
         println!("\x1b[2m  usage stats…\x1b[0m");
         acquire_save(&mut phone, "dumpsys usagestats", &device_dir.join("usagestats.txt"), &out, &mut collected);
@@ -747,6 +825,7 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         if let Err(e) = phone.bugreport(&device_dir.join("bugreport.zip")) {
             eprintln!("\x1b[33m[warn] bugreport: {e}\x1b[0m");
         }
+    }
     }
 
     // Device identifiers (best-effort; some are restricted on non-root shells).
@@ -773,6 +852,7 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
 
     // ---- Per-app acquisition: ALL APK splits + full dumpsys package. ----
     let packages: Vec<String> = match &args.package {
+        _ if args.triage => Vec::new(),
         Some(p) => vec![p.clone()],
         None => match phone.list_third_party() {
             Ok(mut p) => {
@@ -785,7 +865,9 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             }
         },
     };
-    println!("\x1b[2m  {} app(s): APK splits + dumpsys…\x1b[0m", packages.len());
+    if !args.triage {
+        println!("\x1b[2m  {} app(s): APK splits + dumpsys…\x1b[0m", packages.len());
+    }
     let mut apk_count = 0usize;
     for (i, pkg) in packages.iter().enumerate() {
         let appdir = apps_dir.join(pkg);
@@ -810,14 +892,23 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     }
 
     // ---- Evidence bundle (audit trail auto-includes every pull + shell). ----
-    match evidence::write_evidence(&out, &phone, "device_acquire", identifiers.clone(), &[], collected, args.case.to_json()) {
+    let mut meta = args.case.to_json();
+    if let (Some(m), serde_json::Value::Object(o)) = (&args.mandate, &mut meta) {
+        o.insert("mandate".into(), json!(m));
+    }
+    let kind = if args.triage { "device_triage" } else { "device_acquire" };
+    match evidence::write_evidence(&out, &phone, kind, identifiers.clone(), &[], collected, meta) {
         Ok((mpath, sha)) => {
-            println!(
+            if args.triage {
+                println!("\n\x1b[32m✓ Triage done → {}\x1b[0m  \x1b[2m(volatile state, wipe check, identifiers; run a full acquire next)\x1b[0m", out.display());
+            } else {
+                println!(
                 "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) → {}\x1b[0m",
                 packages.len(),
                 apk_count,
                 out.display()
             );
+            }
             println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);
         }
         Err(e) => {
@@ -927,7 +1018,11 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
 
     let started_utc = chrono::Utc::now().to_rfc3339();
 
-    let Some(iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    let Some(mut iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    if let Err(e) = media::load_alert_hashsets(&mut iocs, &args.hashes) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
     if iocs.unsupported > 0 {
         eprintln!("\x1b[33m[warn] {} indicator comparison(s) of unsupported types ignored\x1b[0m", iocs.unsupported);
     }
@@ -1325,13 +1420,107 @@ fn run_diff(args: DiffArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `<case>_<suffix>` next to the case directory.
+fn sibling(case: &Path, suffix: &str) -> PathBuf {
+    let name = case.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "case".into());
+    case.with_file_name(format!("{name}_{suffix}"))
+}
+
+fn run_comms(args: CommsArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let c = case::Case::load(&args.case);
+    let items = comms::load(&c);
+    if items.is_empty() {
+        eprintln!("\x1b[33mNo communications in this case: acquire or import it with --mandate <reference>.\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let mandate = std::fs::read_to_string(args.case.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|m| m["case"]["mandate"].as_str().map(String::from));
+    println!("\x1b[1mCommunications\x1b[0m  \x1b[2m(mandate: {})\x1b[0m", mandate.as_deref().unwrap_or("not recorded"));
+    for (k, (n, rec)) in comms::counts(&items) {
+        let r = if rec > 0 { format!("  \x1b[33m{rec} recovered from deleted records\x1b[0m") } else { String::new() };
+        println!("  {k:<10} {n:>7}{r}");
+    }
+    let dir = args.output.unwrap_or_else(|| sibling(&args.case, "comms"));
+    match comms::export(&c, &items, &dir) {
+        Ok(files) => {
+            for f in files {
+                println!("\x1b[32m✓ {}\x1b[0m", f.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_media(args: MediaArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let c = case::Case::load(&args.case);
+    if !args.case.join("storage").is_dir() {
+        eprintln!("\x1b[33mNo shared storage in this case: acquire or import it with --storage.\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let mut known = std::collections::HashSet::new();
+    for f in &args.known {
+        match media::load_hashset(f) {
+            Ok(h) => {
+                eprintln!("\x1b[2mLoaded {} known hash(es) from {}\x1b[0m", h.len(), f.display());
+                known.extend(h.into_iter().map(|(_, h, _)| h));
+            }
+            Err(e) => {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let mut alert = ioc::IocSet::default();
+    if let Err(e) = media::load_alert_hashsets(&mut alert, &args.hashes) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let items = media::inventory(&c, &known, &alert);
+    let located = items.iter().filter(|i| i.meta.lat.is_some()).count();
+    let n_known = items.iter().filter(|i| i.known).count();
+    let alerts: Vec<&media::Item> = items.iter().filter(|i| i.alert.is_some()).collect();
+    println!("\x1b[1mMedia\x1b[0m  {} file(s), {} with a location, {} known (hash set)", items.len(), located, n_known);
+    for a in &alerts {
+        println!("  \x1b[31m⚠ {}  {}\x1b[0m", a.rel, a.alert.as_deref().unwrap_or(""));
+    }
+    let dir = args.output.unwrap_or_else(|| sibling(&args.case, "media"));
+    match media::export(&c, &items, &dir) {
+        Ok(files) => {
+            for f in files {
+                println!("\x1b[32m✓ {}\x1b[0m", f.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_import(args: ImportArgs) -> ExitCode {
     if args.output.join("manifest.json").exists() {
         eprintln!("\x1b[31m{} already holds a case: pick a new directory\x1b[0m", args.output.display());
         return ExitCode::from(1);
     }
     println!("\x1b[1m\x1b[36mImporting {} → {}\x1b[0m", args.source.display(), args.output.display());
-    match import::import(&args.source, &args.output, args.case.to_json()) {
+    let mut meta = args.case.to_json();
+    if let (Some(m), serde_json::Value::Object(o)) = (&args.mandate, &mut meta) {
+        o.insert("mandate".into(), serde_json::json!(m));
+    }
+    let opts = import::Options { comms: args.mandate.is_some(), storage: args.storage };
+    match import::import(&args.source, &args.output, meta, opts) {
         Ok(s) => {
             println!(
                 "\x1b[32m✓ {} package(s), {} user-installed, {} APK(s), {} user(s)\x1b[0m  \x1b[2m(extraction root: /{})\x1b[0m",
@@ -1380,7 +1569,11 @@ fn run_report(args: ReportArgs) -> ExitCode {
         eprintln!("\x1b[31m{} is not a `device acquire` case (no device/packages.txt)\x1b[0m", args.case.display());
         return ExitCode::from(1);
     }
-    let Some(iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    let Some(mut iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    if let Err(e) = media::load_alert_hashsets(&mut iocs, &args.hashes) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
     let c = case::Case::load(&args.case);
     // Signing-certificate matches need the APKs; the rest comes from the case.
     let apks: Vec<PathBuf> = c.third_party.iter().map(|p| args.case.join("apps").join(p).join("base.apk")).filter(|p| p.is_file()).collect();

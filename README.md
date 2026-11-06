@@ -14,10 +14,12 @@ Android security analysis and phone investigation, in one self-contained binary.
   install / uninstall and traffic history, a unified timeline, a diff between
   two acquisitions, an HTML case report, and a verifiable chain-of-custody
   bundle.
-- **Seized phones**: remote-wipe alert on connection, an identifiers sheet for
-  legal requests (IMEI, IMSI, ICCID, line number, MACs, accounts), and import
-  of full file-system extractions made by lab tools, so phones APEX cannot
-  connect to (locked, broken) get the same analysis.
+- **Seized phones**: remote-wipe alert on connection, a sub-10-second triage,
+  an identifiers sheet for legal requests (IMEI, IMSI, ICCID, line number,
+  MACs, accounts), import of full file-system extractions made by lab tools,
+  and, under a legal mandate, communications (SMS, MMS, calls, contacts,
+  WhatsApp, Telegram, Chrome) with recovery of deleted records, plus media
+  with EXIF / GPS, KML maps and hash-set matching (Project VIC / CAID, NSRL).
 
 ## Install
 
@@ -71,6 +73,18 @@ red alert and say whether the phone is online, so it can be isolated
 (airplane mode, Faraday bag) at once. The same check is a finding,
 `CASE_REMOTE_WIPE`, in offline analysis.
 
+**Triage.** When the phone may lock, run out of battery or be wiped, take
+the volatile state first:
+
+```sh
+apex device acquire --triage -o ./case-42-triage    # ~6 s on the test phone
+```
+
+Clock, remote-wipe check, accounts, processes and their real executables,
+sockets, `/data/local/tmp`, screenshot, telephony identifiers, properties,
+package lists, users and settings, with the usual evidence bundle. Run a full
+acquisition afterwards into another directory.
+
 **Identifiers for legal requests.**
 
 ```sh
@@ -107,9 +121,62 @@ properties; file listings of `/data/local/tmp` and shared storage; and every
 APK under `data/app`. The extraction is only read; each source file used is
 hashed into the manifest, and each file produced too, so `apex verify` works.
 
-Not read from an extraction yet: app-ops and usage-stats history (binary
-formats), network statistics, and communications databases. Accounts need an
-after-first-unlock extraction (they are credential-encrypted).
+`--storage` also copies shared storage (`data/media/0`, without
+`Android/data` and `Android/obb`); `--mandate <reference>` also copies the
+communication databases (below). Not read from an extraction yet: app-ops and
+usage-stats history (binary formats) and network statistics. Accounts and app
+databases need an after-first-unlock extraction (they are
+credential-encrypted).
+
+### Communications, under a legal mandate
+
+SMS, call logs, contacts and messaging are out of scope by default. With a
+mandate, its reference is required on the command line and recorded in the
+manifest:
+
+```sh
+apex device acquire --mandate "JIRS-2026-17" -o ./case-42      # live phone
+apex import ./extraction.zip --mandate "JIRS-2026-17" -o ./case-42
+apex comms ./case-42 -o ./case-42-comms                        # comms.csv + comms.json
+```
+
+| Source | Live phone (no root) | Extraction |
+|---|---|---|
+| SMS | `content query` | `mmssms.db` |
+| MMS text and attachments | `content query`, `content read` | `mmssms.db` + `app_parts/` |
+| Call log | `content query` | `calllog.db` / `contacts2.db` |
+| Contacts | usually refused to the shell | `contacts2.db` (incl. contacts flagged deleted) |
+| WhatsApp (messages, media paths, contact names) | no | `msgstore.db` (current and legacy schema), `wa.db` |
+| Telegram | no | `cache4.db` (text extracted from message blobs, best effort) |
+| Chrome history and downloads | no | `History` |
+
+**Deleted records.** Databases are copied with their write-ahead log. APEX
+parses every WAL frame (older page versions included) and the free pages of
+the main file, and reports rows whose id is no longer in the table as
+recovered (`[recovered deleted record]` in the timeline, finding
+`CASE_DELETED_COMMS_RECOVERED`). Unallocated space inside live pages is not
+carved. Databases are always opened from a temporary copy, so the evidence is
+never modified.
+
+Everything goes into the timeline. The HTML report only shows counts per kind;
+content is exported with `apex comms`.
+
+### Media, locations and hash sets
+
+```sh
+apex device acquire --storage -o ./case-42           # pulls shared storage
+apex media ./case-42 --hashes vics.json --known NSRLFile.txt -o ./case-42-media
+apex analyze ./case-42 --hashes vics.json            # hash-set matches as findings
+```
+
+`apex media` writes `media.csv` (SHA-256, SHA-1, MD5, EXIF date, make, model,
+GPS), `locations.kml` (Google Earth, QGIS) and `locations.geojson`. Photo
+locations come from EXIF, video locations from the MP4 / MOV `©xyz` atom.
+Hash sets: Project VIC / CAID VICS JSON (with category), NSRL (legacy
+`NSRLFile.txt` or RDSv3 SQLite), or any file with one hash per line.
+`--known` sets files aside; `--hashes` raises a `HASH_SET_MATCH` finding with
+the file path, in `media`, `analyze` and `report`. Dated photos and videos go
+into the timeline with their location.
 
 ## Connecting a phone
 
@@ -216,9 +283,10 @@ directory. The screenshot is written to `/data/local/tmp/apex_screen.png`,
 pulled, then deleted. Both show in `audit.jsonl` and in the manifest's
 methodology statement; `--no-bugreport` and `--no-screenshot` avoid them.
 
-**Out of scope, on purpose.** SMS/MMS, call logs, contacts and notification
-*content* are legally sensitive: notifications are captured redacted unless
-you pass `--notification-content` under an appropriate mandate. App-private
+**Out of scope by default.** SMS/MMS, call logs, contacts, messaging and
+notification *content* are legally sensitive: they are collected only with
+`--mandate <reference>` (and notifications unredacted only with
+`--notification-content`). App-private
 data (`/data/data`) and user-installed CA certificates need root and are not
 collected. This is not a forensic image: use a validated imaging tool for
 deleted content or full file systems.
@@ -271,6 +339,8 @@ and report.
 | `CASE_APPS_REMOVED` | Every app uninstalled and no longer on the phone, with date and caller |
 | `CASE_FIRST_BOOT` | When the phone was set up or last factory reset: nothing older survives |
 | `CASE_NET_USAGE` | Traffic per user app (received / sent) over the period the system keeps |
+| `CASE_COMMUNICATIONS`, `CASE_DELETED_COMMS_RECOVERED` | Communications collected under mandate; deleted ones recovered |
+| `CASE_MEDIA`, `HASH_SET_MATCH` | Shared storage collected (with how many located); a file matching an alert hash set |
 | `CASE_REMOTE_WIPE` | A find-my-device service, an MDM or a device admin can erase the phone remotely |
 | `CASE_BACKGROUND_UPLOAD` | A user app sent more than 20 MB in the background, more than it received |
 

@@ -24,7 +24,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn alteration_notes() -> Vec<&'static str> {
     vec![
         "Acquisition is LIVE: the device is powered on and USB debugging is authorized. Connecting and running shell commands alters volatile state (spawns shell processes, updates usage statistics and logs).",
-        "APEX issues read-oriented commands (getprop, getenforce, settings get/list, pm list, pm path, dumpsys, cmd, ps, ls, cat /proc/net/*, logcat -d, and the read-only getters 1-16 of `service call iphonesubinfo` for IMEI / IMSI / ICCID / line number) and file pulls. It installs nothing and changes no setting.",
+        "APEX issues read-oriented commands (getprop, getenforce, settings get/list, pm list, pm path, dumpsys, cmd, ps, ls, cat /proc/net/*, logcat -d, and the read-only getters 1-16 of `service call iphonesubinfo` for IMEI / IMSI / ICCID / line number). Under `--mandate` it also reads the SMS / MMS / call-log / contacts providers (`content query`, `content read` for MMS attachments), and `--storage` pulls shared storage and file pulls. It installs nothing and changes no setting.",
         "`device acquire` writes to the device in two places only: `bugreportz` leaves its zip in the shell user's bugreports directory (not deleted), and the screenshot is written to /data/local/tmp/apex_screen.png, pulled, then removed (skip with --no-screenshot / --no-bugreport). Both are visible in audit.jsonl.",
         "Every command issued is recorded in audit.jsonl with a UTC timestamp and the SHA-256 of its raw output; acquired files are hashed on pull.",
         "This is NOT a forensic image: it does not capture app-private data (/data/data), deleted content, or a physical/file-system image. Use a validated acquisition tool for evidential imaging.",
@@ -59,7 +59,7 @@ fn import_notes() -> Vec<&'static str> {
     vec![
         "Import of an existing full file-system extraction: no device was contacted. The extraction is only read; every source file used is listed in `inputs` with its SHA-256.",
         "The files under device/ are derived from the extraction (system XML in text or ABX form, SQLite account databases opened from a temporary copy, build and persistent properties), rewritten in the text format APEX's analysers read. They are listed in `reports` with their SHA-256. APKs under apps/ are byte-for-byte copies.",
-        "Stored Wi-Fi passwords are not copied. Notification, SMS, call and contact databases are not read.",
+        "Stored Wi-Fi passwords are not copied. Communication databases (SMS / MMS, calls, contacts, WhatsApp, Telegram, Chrome) are copied only with `--mandate`, together with their WAL so deleted rows can be recovered; shared storage only with `--storage`.",
         "File times in the storage listings come from the archive metadata, which depends on the extraction tool.",
     ]
 }

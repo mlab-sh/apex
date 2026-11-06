@@ -462,9 +462,66 @@ impl Case {
         out.extend(p1);
         out.extend(crate::history::findings(self, iocs));
         out.extend(crate::seizure::wipe_finding(self));
+        out.extend(self.comms_media_findings());
         let mut hits = iocs.scan_dir(&self.root, &self.package_names());
         hits.extend(net_hits);
         out.extend(ioc_findings(&hits));
+        out
+    }
+
+    fn comms_media_findings(&self) -> Vec<Finding> {
+        let mut out = Vec::new();
+        let items = crate::comms::load(self);
+        if !items.is_empty() {
+            let counts = crate::comms::counts(&items);
+            let list: Vec<String> = counts.iter().map(|(k, (n, _))| format!("{n} {k}")).collect();
+            out.push(
+                Finding::new(
+                    "CASE_COMMUNICATIONS",
+                    format!("{} communication record(s) collected under mandate", items.len()),
+                    format!("{}. Export them with `apex comms`.", list.join(", ")),
+                    Severity::Info,
+                    "investigation",
+                )
+                .meta("counts", json!(counts.iter().map(|(k, (n, r))| (k.clone(), json!({"total": n, "recovered": r}))).collect::<serde_json::Map<_, _>>())),
+            );
+            let rec: Vec<&crate::comms::Comm> = items.iter().filter(|c| c.recovered).collect();
+            if !rec.is_empty() {
+                let by: BTreeMap<&str, usize> = rec.iter().fold(BTreeMap::new(), |mut m, c| {
+                    *m.entry(c.kind).or_default() += 1;
+                    m
+                });
+                out.push(
+                    Finding::new(
+                        "CASE_DELETED_COMMS_RECOVERED",
+                        format!("{} deleted communication record(s) recovered", rec.len()),
+                        format!(
+                            "Rows deleted from the app databases were recovered from the write-ahead log and free pages ({}). Deletion shortly before a seizure can matter; check their dates in the timeline.",
+                            by.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
+                        ),
+                        Severity::Medium,
+                        "investigation",
+                    )
+                    .meta("recovered", json!(by)),
+                );
+            }
+        }
+        let files = crate::media::storage_files(self);
+        if !files.is_empty() {
+            let metas = crate::par_map(&files, |p| crate::media::file_meta(p));
+            let located = metas.iter().filter(|m| m.lat.is_some()).count();
+            out.push(
+                Finding::new(
+                    "CASE_MEDIA",
+                    format!("{} media / storage file(s), {located} with a location", files.len()),
+                    "Shared storage was collected. `apex media` exports the inventory (hashes, EXIF), a KML / GeoJSON map of located photos and videos, and matches hash sets.".to_string(),
+                    Severity::Info,
+                    "investigation",
+                )
+                .meta("files", json!(files.len()))
+                .meta("located", json!(located)),
+            );
+        }
         out
     }
 
@@ -502,6 +559,8 @@ impl Case {
         }
         ev.extend(crate::artifacts::events(self));
         ev.extend(crate::history::events(self));
+        ev.extend(crate::comms::events(self));
+        ev.extend(crate::media::events(self));
         ev.sort_by(|a, b| a.local.cmp(&b.local).then(a.message.cmp(&b.message)));
         // appops lists one access under several states/attribution tags.
         ev.dedup_by(|a, b| a.local == b.local && a.desc == b.desc && a.package == b.package && a.message == b.message);
@@ -533,17 +592,12 @@ pub fn ioc_findings(hits: &[ioc::Hit]) -> Vec<Finding> {
         .into_iter()
         .map(|((kind, value), (malware, sources))| {
             let sources: Vec<String> = sources.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
-            Finding::new(
-                "IOC_MATCH",
-                format!("Indicator of compromise: {malware}"),
-                format!(
-                    "{} '{value}' matches a known indicator of {malware}. Seen in: {}.",
-                    kind.label(),
-                    sources.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-                ),
-                Severity::Critical,
-                "ioc",
-            )
+            let seen = sources.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let (id, title, desc) = match malware.strip_prefix("hash set: ") {
+                Some(set) => ("HASH_SET_MATCH", format!("File matches alert hash set {set}: {}", sources.first().cloned().unwrap_or_default()), format!("{} {value} is listed in the alert hash set {set}. File(s): {seen}.", kind.label())),
+                None => ("IOC_MATCH", format!("Indicator of compromise: {malware}"), format!("{} '{value}' matches a known indicator of {malware}. Seen in: {seen}.", kind.label())),
+            };
+            Finding::new(id, title, desc, Severity::Critical, "ioc")
             .meta("kind", json!(kind.label()))
             .meta("value", json!(value))
             .meta("malware", json!(malware))

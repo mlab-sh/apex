@@ -246,6 +246,23 @@ impl Phone {
         }
     }
 
+    /// Like `run`, for binary output (e.g. `content read`).
+    pub fn run_raw(&mut self, cmd: &str) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        let started = Instant::now();
+        match self.dev.shell_command(&cmd.to_string(), Some(&mut out), None) {
+            Ok(_) => {
+                self.record(format!("shell: {cmd}"), started, true, Some(&out), None);
+                Ok(out)
+            }
+            Err(e) => {
+                let err = format!("shell '{cmd}' failed: {e}");
+                self.record(format!("shell: {cmd}"), started, false, Some(&out), Some(err.clone()));
+                Err(err)
+            }
+        }
+    }
+
     /// List third-party (non-system) package names, sorted.
     pub fn list_third_party(&mut self) -> Result<Vec<String>, String> {
         let out = self.run("pm list packages -3")?;

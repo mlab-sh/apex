@@ -329,6 +329,36 @@ fn sha(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
+/// What else to copy besides the system state.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// Communication databases (only under a legal mandate).
+    pub comms: bool,
+    /// Shared storage (`data/media/0`).
+    pub storage: bool,
+}
+
+/// Stream `r` into `dst`, returning (sha256, bytes).
+fn copy_stream(r: &mut dyn Read, dst: &Path) -> Result<(String, usize), String> {
+    if let Some(p) = dst.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    let mut f = std::fs::File::create(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut n = 0usize;
+    loop {
+        let k = r.read(&mut buf).map_err(|e| format!("{}: {e}", dst.display()))?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        std::io::Write::write_all(&mut f, &buf[..k]).map_err(|e| e.to_string())?;
+        n += k;
+    }
+    Ok((format!("{:x}", h.finalize()), n))
+}
+
 pub struct Summary {
     pub root_prefix: String,
     pub packages: usize,
@@ -340,7 +370,7 @@ pub struct Summary {
 }
 
 /// Import `src` into the case directory `out`.
-pub fn import(src: &Path, out: &Path, case_meta: Value) -> Result<Summary, String> {
+pub fn import(src: &Path, out: &Path, case_meta: Value, opts: Options) -> Result<Summary, String> {
     let started = chrono::Utc::now().to_rfc3339();
     let prefix = find_root(src)?;
     let dev = out.join("device");
@@ -354,6 +384,8 @@ pub fn import(src: &Path, out: &Path, case_meta: Value) -> Result<Summary, Strin
     let mut apks: Vec<(String, PathBuf)> = Vec::new();
     let mut listed: Vec<Listed> = Vec::new();
     let mut inputs: Vec<Value> = Vec::new();
+    // Extra copies (communications, storage), relative to `out`, for the manifest.
+    let mut copied: Vec<String> = Vec::new();
     walk(src, &mut |rel, size, mt, r| {
         let Some(rel) = rel.strip_prefix(prefix.as_str()) else { return Ok(()) };
         for (dir, base) in LISTED {
@@ -368,21 +400,26 @@ pub fn import(src: &Path, out: &Path, case_meta: Value) -> Result<Summary, Strin
             files.insert(rel.to_string(), b);
         } else if is_apk(rel) {
             let dst = staging.join(format!("{}.apk", apks.len()));
-            let mut f = std::fs::File::create(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
-            let mut h = Sha256::new();
-            let mut buf = vec![0u8; 1 << 20];
-            let mut n = 0usize;
-            loop {
-                let k = r.read(&mut buf).map_err(|e| format!("{rel}: {e}"))?;
-                if k == 0 {
-                    break;
-                }
-                h.update(&buf[..k]);
-                std::io::Write::write_all(&mut f, &buf[..k]).map_err(|e| e.to_string())?;
-                n += k;
-            }
-            inputs.push(json!({"file": format!("{prefix}{rel}"), "sha256": format!("{:x}", h.finalize()), "bytes": n}));
+            let (h, n) = copy_stream(r, &dst)?;
+            inputs.push(json!({"file": format!("{prefix}{rel}"), "sha256": h, "bytes": n}));
             apks.push((format!("/{rel}"), dst));
+        } else {
+            let target = if opts.comms {
+                crate::comms::db_name(rel)
+                    .map(|(name, ext)| format!("comms/db/{name}{ext}"))
+                    .or_else(|| rel.strip_prefix(crate::comms::MMS_PARTS_DIR).map(|f| format!("comms/mms_parts/{f}")))
+            } else {
+                None
+            }
+            .or_else(|| {
+                let rest = rel.strip_prefix("data/media/0/")?;
+                (opts.storage && !rest.starts_with("Android/data/") && !rest.starts_with("Android/obb/")).then(|| format!("storage/{rest}"))
+            });
+            if let Some(t) = target {
+                let (h, n) = copy_stream(r, &out.join(&t))?;
+                inputs.push(json!({"file": format!("{prefix}{rel}"), "sha256": h, "bytes": n}));
+                copied.push(t);
+            }
         }
         Ok(())
     })?;
@@ -589,6 +626,10 @@ pub fn import(src: &Path, out: &Path, case_meta: Value) -> Result<Summary, Strin
         }
     }
     let _ = std::fs::remove_dir_all(&staging);
+    if opts.comms && !copied.iter().any(|c| c.starts_with("comms/db/")) {
+        missing.push("communication databases (app data: needs an after-first-unlock extraction)");
+    }
+    produced.extend(copied);
 
     // ---- Evidence: hash of every source file read, and of every file produced.
     let produced_paths: Vec<PathBuf> = produced.iter().map(|p| out.join(p)).collect();

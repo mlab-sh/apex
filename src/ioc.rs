@@ -238,6 +238,17 @@ impl IocSet {
             let path = e.path();
             let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
             let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+            // Pulled media and message attachments: hash-set matching.
+            if want_hashes && ext != "apk" && (rel.starts_with("storage") || rel.starts_with("comms")) {
+                if let Some(hs) = file_hashes(path) {
+                    for (k, h) in [Kind::Sha256, Kind::Sha1, Kind::Md5].into_iter().zip(hs) {
+                        if let Some(m) = self.get(k, &h) {
+                            push_hit(&mut hits, k, &h, m, &rel);
+                        }
+                    }
+                }
+                continue;
+            }
             match ext.as_str() {
                 "apk" => {
                     if want_hashes {
@@ -287,6 +298,26 @@ impl IocSet {
         }
         hits
     }
+}
+
+/// Streaming SHA-256, SHA-1, MD5 of a file.
+pub fn file_hashes(p: &Path) -> Option<[String; 3]> {
+    use md5::Md5;
+    use sha1::Sha1;
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(p).ok()?;
+    let (mut a, mut b, mut c) = (Sha256::new(), Sha1::new(), Md5::new());
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let k = std::io::Read::read(&mut f, &mut buf).ok()?;
+        if k == 0 {
+            break;
+        }
+        a.update(&buf[..k]);
+        b.update(&buf[..k]);
+        c.update(&buf[..k]);
+    }
+    Some([format!("{:x}", a.finalize()), format!("{:x}", b.finalize()), format!("{:x}", c.finalize())])
 }
 
 fn push_hit(hits: &mut Vec<Hit>, kind: Kind, value: &str, malware: &str, source: &str) {
