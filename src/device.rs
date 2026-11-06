@@ -61,6 +61,31 @@ pub fn detect_devices() -> Result<Vec<(u16, u16)>, String> {
     Ok(devs.iter().map(|d| (d.vendor_id, d.product_id)).collect())
 }
 
+/// `~/.android/adbkey` (same path as the platform `adb`), created if missing.
+///
+/// Without a persistent key, `adb_client` signs with a fresh random key on
+/// every connection, so the phone re-prompts "Allow USB debugging?" each time.
+fn default_adb_key() -> Result<PathBuf, String> {
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    let home = std::env::var_os("HOME").ok_or("HOME is not set; pass --adb-key")?;
+    let path = PathBuf::from(home).join(".android").join("adbkey");
+    if path.exists() {
+        return Ok(path);
+    }
+    let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)
+        .map_err(|e| format!("cannot generate ADB key: {e}"))?;
+    let pem = key.to_pkcs8_pem(LineEnding::LF).map_err(|e| format!("cannot encode ADB key: {e}"))?;
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("cannot create ~/.android: {e}"))?;
+    std::fs::write(&path, pem.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    eprintln!("\x1b[2mCreated ADB key {} — accept the phone's prompt once and tick \"Always allow\".\x1b[0m", path.display());
+    Ok(path)
+}
+
 pub struct Phone {
     dev: ADBUSBDevice,
     /// Tamper-evident record of every action taken against the device.
@@ -73,11 +98,23 @@ impl Phone {
     /// Autodetect and connect to the single attached ADB-USB device.
     /// The phone must be in USB-debugging mode and authorized (RSA prompt).
     pub fn connect(key: Option<PathBuf>) -> Result<Phone, String> {
-        let dev = match key {
-            Some(k) => ADBUSBDevice::autodetect_with_custom_private_key(k),
-            None => ADBUSBDevice::autodetect(),
-        }
-        .map_err(|e| format!("ADB USB connection failed: {e}"))?;
+        let key = match key {
+            Some(k) => k,
+            None => default_adb_key()?,
+        };
+        // The handshake blocks until the phone authorizes this key; say so, or a
+        // pending "Allow USB debugging?" prompt looks like a hang.
+        let waiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let w = waiting.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if w.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("\x1b[33mWaiting for the phone: unlock it and accept \"Allow USB debugging?\" (tick \"Always allow\").\x1b[0m");
+            }
+        });
+        let dev = ADBUSBDevice::autodetect_with_custom_private_key(key);
+        waiting.store(false, std::sync::atomic::Ordering::Relaxed);
+        let dev = dev.map_err(|e| format!("ADB USB connection failed: {e}"))?;
         Ok(Phone {
             dev,
             log: Vec::new(),
@@ -191,6 +228,21 @@ impl Phone {
             .or_else(|| paths.first())
             .cloned();
         Ok(base)
+    }
+
+    /// Generate a full bugreport on the device (`bugreportz`, 1-5 min) and
+    /// pull the zip to `local`. Returns the on-device path. The zip is left in
+    /// the shell user's own bugreports dir (not deleted: no device alteration
+    /// beyond creating it).
+    pub fn bugreport(&mut self, local: &Path) -> Result<String, String> {
+        let out = self.run("bugreportz")?;
+        let remote = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("OK:"))
+            .map(|s| s.trim().to_string())
+            .ok_or_else(|| format!("bugreportz failed: {}", out.trim()))?;
+        self.pull(&remote, local)?;
+        Ok(remote)
     }
 
     /// Pull a remote file into a local path.

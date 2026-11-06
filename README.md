@@ -72,7 +72,49 @@ apex analyze ./extraction --detail
 apex analyze ./extraction --evidence ./case  # + hashed, chain-of-custody manifest
 apex analyze ./extraction --packages installed.txt   # also match an app list vs stalkerware
 apex analyze ./extraction --json -o reports/ --fail-on high
+apex analyze ./case-42 --iocs stalkerware.stix2 --iocs pegasus.stix2   # STIX2 IOC matching
 ```
+
+Every APK is also checked against the bundled **stalkerware signing
+certificates** (Echap), which catches renamed or repackaged builds that the
+package-name match misses.
+
+### Investigating a `device acquire` case
+
+When the path is a case directory written by `apex device acquire`, `analyze`
+adds an **Investigation** section built from the collected artifacts:
+
+- **Stalkerware capability profile** per user-installed app: accessibility
+  service, device admin, notification listener, no launcher icon, installed
+  outside a known store, sensitive permissions actually used. Combined into a
+  score, so a renamed stalkerware still stands out.
+- **Hidden apps**: user-installed apps without a launcher icon.
+- **Sensitive permission use**: when each app last used the microphone,
+  camera, location, SMS, call log, contacts, screen capture… (from
+  `dumpsys appops`, device-local time).
+- **IOC matches** (`--iocs`, STIX 2.x, repeatable): package names, APK
+  SHA-256/SHA-1/MD5, signing-certificate SHA-1, and domains / IPs / URLs found
+  anywhere in the collected text, including inside `bugreport.zip`. Subdomains
+  match their listed parent. Works with Echap's
+  [`generated/stalkerware.stix2`](https://github.com/AssoEchap/stalkerware-indicators/tree/master/generated)
+  and MVT-style IOC files.
+- **Clock skew** between the phone and the examiner's machine.
+
+`--json` / `--evidence` also write `case_report.json`.
+
+### Timeline (`apex timeline`)
+
+```sh
+apex timeline ./case-42                     # → ./case-42/timeline.csv
+apex timeline ./case-42 -o timeline.jsonl   # JSONL instead of CSV
+```
+
+Merges app install/update times, app-op accesses (mic, camera, location…),
+usage-stats events and logcat into one chronologically sorted file with the
+Timesketch columns (`datetime,timestamp_desc,source,package,message`). Times
+carry the device's UTC offset read at acquisition (`device/clock.txt`). Writing
+the timeline inside the case adds a file that `apex verify` will list as
+unlisted; pass `-o` elsewhere to keep the bundle untouched.
 
 It prints a per-package report, an **extraction-wide severity summary**, a
 **top-risk triage table** (worst packages first, stalkerware flagged), and the
@@ -100,7 +142,8 @@ Uses `adb_client`'s `ADBUSBDevice` for a direct USB connection (no `adb`
 server required). `pm list packages -3` enumerates non-system packages,
 `pm path` resolves each base APK, which is pulled to a temp dir and run through
 the same analyzers as `apex scan`. Options: `--adb-key <PATH>` for a custom ADB
-private key (default `~/.android/adbkey`), plus `--json`/`-o`/`--detail`/`--fail-on`.
+private key (default `~/.android/adbkey`, created on first use so the phone
+only asks to authorize once; tick "Always allow"), plus `--json`/`-o`/`--detail`/`--fail-on`.
 
 Everything on-device runs over a **non-root** ADB shell; the few checks that
 benefit from root degrade gracefully when the data is unreadable.
@@ -115,15 +158,19 @@ evidence bundle.
 apex device acquire -o ./case-42
 apex device acquire --package com.foo.bar -o ./case-42
 apex device acquire --no-logcat --no-usagestats -o ./case-42   # skip the large captures
+apex device acquire --no-bugreport -o ./case-42   # skip the full bugreport (1-5 min)
 ```
 
 Output layout:
 
 ```
 case-42/
-  device/   getprop, identifiers.json (serial, android_id, fingerprint, ABI…),
-            packages.txt (pm list -f -i -u), usagestats.txt (app-usage timeline),
-            accounts.txt, wifi.txt, bluetooth.txt, device_policy.txt, logcat.txt
+  device/   clock.txt (device time + UTC offset), getprop, identifiers.json
+            (serial, android_id, fingerprint, ABI…), packages.txt (pm list -f -i -u),
+            usagestats.txt (app-usage timeline), appops.txt (permission-use history),
+            launcher_activities.txt (to spot hidden apps), settings_{secure,global,system}.txt,
+            accounts.txt, wifi.txt, bluetooth.txt, device_policy.txt, logcat.txt,
+            bugreport.zip (full dumpstate: every dumpsys, tombstones/ANRs, battery history)
   apps/<pkg>/  base.apk + every split_config.*.apk, dumpsys_package.txt
   manifest.json / manifest.json.sha256 / audit.jsonl
 ```

@@ -24,3 +24,4 @@ apk-test
 apex_dump
 # Local release artifacts
 /dist
+docs/

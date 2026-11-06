@@ -2,10 +2,12 @@
 
 mod adb_checks;
 mod analyzers;
+mod case;
 mod cert_util;
 mod device;
 mod elf_util;
 mod evidence;
+mod ioc;
 mod models;
 mod output;
 mod scanner;
@@ -43,6 +45,17 @@ enum Command {
     Verify(VerifyArgs),
     /// Connect to an Android phone over USB (ADB) and scan its installed apps
     Device(DeviceArgs),
+    /// Build a unified timeline (CSV or JSONL) from a `device acquire` case
+    Timeline(TimelineArgs),
+}
+
+#[derive(clap::Args)]
+struct TimelineArgs {
+    /// Case directory written by `apex device acquire`
+    case: PathBuf,
+    /// Output file: `.csv` (Timesketch columns) or `.jsonl` (default: <case>/timeline.csv)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -59,6 +72,10 @@ struct AnalyzeArgs {
     /// the stalkerware indicators (e.g. an extraction's installed-apps list)
     #[arg(long = "packages")]
     packages: Option<PathBuf>,
+    /// STIX2 indicator bundle to match (repeatable), e.g. Echap's
+    /// generated/stalkerware.stix2 or an MVT/Amnesty IOC file
+    #[arg(long = "iocs")]
+    iocs: Vec<PathBuf>,
     /// Write a JSON report per package
     #[arg(long = "json")]
     json_output: bool,
@@ -159,6 +176,9 @@ struct DeviceAcquireArgs {
     /// Skip the (large) usage-stats capture
     #[arg(long = "no-usagestats")]
     no_usagestats: bool,
+    /// Skip the full bugreport (slow: 1-5 min, 10-100 MB)
+    #[arg(long = "no-bugreport")]
+    no_bugreport: bool,
     /// Path to a custom ADB private key (default: ~/.android/adbkey)
     #[arg(long = "adb-key")]
     adb_key: Option<PathBuf>,
@@ -257,6 +277,7 @@ fn main() -> ExitCode {
         Command::Scan(args) => run_scan(args),
         Command::Analyze(args) => run_analyze(args),
         Command::Verify(args) => run_verify(args),
+        Command::Timeline(args) => run_timeline(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -473,12 +494,27 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
 
     // ---- Device-level metadata & logs (non-root, read-only). ----
     println!("\x1b[2m  device metadata…\x1b[0m");
+    // First, so the device clock is read right next to the host timestamp in the audit log.
+    acquire_save(&mut phone, "date '+%Y-%m-%dT%H:%M:%S%z'", &device_dir.join("clock.txt"), &out, &mut collected);
     acquire_save(&mut phone, "getprop", &device_dir.join("getprop.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -f -i -u", &device_dir.join("packages.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "pm list packages -3", &device_dir.join("packages_3.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys device_policy", &device_dir.join("device_policy.txt"), &out, &mut collected);
+    // Investigation inputs: permission use history, hidden apps, enabled services.
+    acquire_save(&mut phone, "dumpsys appops", &device_dir.join("appops.txt"), &out, &mut collected);
+    acquire_save(
+        &mut phone,
+        "cmd package query-activities -a android.intent.action.MAIN -c android.intent.category.LAUNCHER",
+        &device_dir.join("launcher_activities.txt"),
+        &out,
+        &mut collected,
+    );
+    for ns in ["secure", "global", "system"] {
+        acquire_save(&mut phone, &format!("settings list {ns}"), &device_dir.join(format!("settings_{ns}.txt")), &out, &mut collected);
+    }
     if !args.no_usagestats {
         println!("\x1b[2m  usage stats…\x1b[0m");
         acquire_save(&mut phone, "dumpsys usagestats", &device_dir.join("usagestats.txt"), &out, &mut collected);
@@ -486,6 +522,14 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     if !args.no_logcat {
         println!("\x1b[2m  logcat…\x1b[0m");
         acquire_save(&mut phone, "logcat -d -v threadtime", &device_dir.join("logcat.txt"), &out, &mut collected);
+    }
+
+    if !args.no_bugreport {
+        println!("\x1b[2m  bugreport (1-5 min, keep the phone unlocked and plugged in)…\x1b[0m");
+        // The pull is recorded (and hashed) in the audit trail → manifest artifacts.
+        if let Err(e) = phone.bugreport(&device_dir.join("bugreport.zip")) {
+            eprintln!("\x1b[33m[warn] bugreport: {e}\x1b[0m");
+        }
     }
 
     // Device identifiers (best-effort; some are restricted on non-root shells).
@@ -661,6 +705,21 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
 
     let started_utc = chrono::Utc::now().to_rfc3339();
 
+    let mut iocs = ioc::IocSet::default();
+    for f in &args.iocs {
+        match iocs.load_stix2(f) {
+            Ok(n) => println!("\x1b[2mLoaded {n} indicator(s) from {}\x1b[0m", f.display()),
+            Err(e) => {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if iocs.unsupported > 0 {
+        eprintln!("\x1b[33m[warn] {} indicator comparison(s) of unsupported types ignored\x1b[0m", iocs.unsupported);
+    }
+    let is_case = args.path.is_dir() && case::Case::is_case(&args.path);
+
     // Gather analyzable package files (recursively for a directory).
     let mut files: Vec<PathBuf> = Vec::new();
     if args.path.is_dir() {
@@ -680,7 +739,7 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    if files.is_empty() {
+    if files.is_empty() && !is_case && iocs.is_empty() {
         println!("No analyzable packages found under {}.", args.path.display());
         return ExitCode::SUCCESS;
     }
@@ -707,10 +766,23 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
     // Per-app triage rows: (label, score, critical, high, stalkerware).
     let mut triage: Vec<(String, i64, u64, u64, bool)> = Vec::new();
 
-    for f in &files {
-        let hash = scanner::compute_hash(f).unwrap_or_default();
-        let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-        let mut result = scanner::scan::<fn(&models::Finding)>(f, None);
+    // Scan every package on all cores; reporting below stays sequential and in order.
+    let n = files.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let scanned = par_map(&files, |f| {
+        let r = (
+            scanner::compute_hash(f).unwrap_or_default(),
+            std::fs::metadata(f).map(|m| m.len()).unwrap_or(0),
+            scanner::scan::<fn(&models::Finding)>(f, None),
+            adb_checks::stalkerware_cert_findings(f),
+        );
+        let k = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        eprint!("\r\x1b[2K\x1b[2m  scanned {k}/{n}\x1b[0m");
+        r
+    });
+    eprint!("\r\x1b[2K");
+
+    for (f, (hash, size, mut result, cert_hits)) in files.iter().zip(scanned) {
 
         // Offline stalkerware match by declared package name.
         let pkg = result
@@ -725,6 +797,11 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
             sw_hits.push(pkg.clone());
             result.findings.push(adb_checks::stalkerware_package_finding(&pkg));
         }
+        if !cert_hits.is_empty() && !is_sw {
+            is_sw = true;
+            sw_hits.push(if pkg.is_empty() { label_of(f, &args.path) } else { pkg.clone() });
+        }
+        result.findings.extend(cert_hits);
 
         let label = f
             .strip_prefix(&args.path)
@@ -787,6 +864,70 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
                 }
             }
             Err(e) => eprintln!("\x1b[33m[warn] cannot read --packages {}: {e}\x1b[0m", pf.display()),
+        }
+    }
+
+    // ---- Case-level investigation (acquisition dirs) and IOC matching. ----
+    if is_case || !iocs.is_empty() {
+        let findings = if is_case {
+            let c = case::Case::load(&args.path);
+            print_header(&format!("Investigation — {}", args.path.display()), "case");
+            println!(
+                "\x1b[2m  {} package(s), {} app-op access(es), clock UTC{}{}\x1b[0m\n",
+                c.packages.len(),
+                c.appops.len(),
+                c.utc_offset.as_deref().unwrap_or("?"),
+                c.clock_skew_s.map(|s| format!(", skew {s}s")).unwrap_or_default()
+            );
+            c.findings(&iocs)
+        } else {
+            print_header(&format!("IOC matching — {}", args.path.display()), "ioc");
+            case::ioc_findings(&iocs.scan_dir(&args.path, &[]))
+        };
+        let mut findings = findings;
+        findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+        if findings.is_empty() {
+            println!("  \x1b[32mNo investigation findings.\x1b[0m\n");
+        }
+        for f in &findings {
+            print_finding(f, args.detail);
+            if let Some(n) = totals.get_mut(f.severity.value()) {
+                *n += 1;
+            } else {
+                totals.insert(f.severity.value().to_string(), 1);
+            }
+        }
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "kind": "case_investigation",
+            "path": args.path.display().to_string(),
+            "ioc_sources": iocs.sources.iter().map(|(f, n)| json!({"file": f, "indicators": n})).collect::<Vec<_>>(),
+            "findings": findings.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
+        });
+        let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+        let mut targets: Vec<PathBuf> = Vec::new();
+        if args.json_output {
+            targets.push(args.output.clone().unwrap_or_else(|| PathBuf::from(".")).join("case_report.json"));
+        }
+        if let Some(edir) = &args.evidence {
+            targets.push(edir.join("case_report.json"));
+        }
+        for t in targets {
+            match std::fs::write(&t, &text) {
+                Ok(()) => {
+                    println!("\x1b[32mJSON report: {}\x1b[0m", t.display());
+                    if args.evidence.as_ref().is_some_and(|e| t.starts_with(e)) {
+                        report_paths.push(t);
+                    }
+                }
+                Err(e) => eprintln!("\x1b[31mError writing {}: {e}\x1b[0m", t.display()),
+            }
+        }
+        if let Some(fl) = args.fail_on {
+            let idx = SEVERITY_ORDER.iter().position(|&s| s == fl.as_str()).unwrap_or(0);
+            if findings.iter().any(|f| SEVERITY_ORDER[..=idx].contains(&f.severity.value())) {
+                any_fail = true;
+            }
         }
     }
 
@@ -890,6 +1031,57 @@ fn run_verify(args: VerifyArgs) -> ExitCode {
         println!("\x1b[1m\x1b[91mBundle integrity: FAILED\x1b[0m\n");
         ExitCode::from(1)
     }
+}
+
+/// Map `f` over `items` on every core, preserving input order.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(items.len().max(1));
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                out.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|r| r.expect("every index is filled")).collect()
+}
+
+fn label_of(f: &Path, root: &Path) -> String {
+    f.strip_prefix(root).unwrap_or(f).to_string_lossy().into_owned()
+}
+
+fn run_timeline(args: TimelineArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not a `device acquire` case (no device/packages.txt)\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let c = case::Case::load(&args.case);
+    let events = c.timeline();
+    let out = args.output.unwrap_or_else(|| args.case.join("timeline.csv"));
+    if let Err(e) = case::write_timeline(&c, &events, &out) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let mut per: Vec<(String, usize)> = case::per_source(&events).into_iter().collect();
+    per.sort();
+    println!("\x1b[32m✓ {} event(s) → {}\x1b[0m", events.len(), out.display());
+    for (src, n) in per {
+        println!("  {src:<18} {n:>7}");
+    }
+    let skew = c.clock_skew_s.map(|s| format!("; device clock skew {s}s vs host")).unwrap_or_default();
+    match (&c.tz, &c.utc_offset) {
+        (Some(tz), _) => println!("\x1b[2m  device-local times with per-event offsets ({tz}, DST-aware){skew}\x1b[0m"),
+        (None, Some(o)) => println!("\x1b[33m  time zone unknown: capture-time offset UTC{o} applied to every event (wrong across DST){skew}\x1b[0m"),
+        (None, None) => println!("\x1b[33m  no time zone or clock info: times are device-local with unknown offset\x1b[0m"),
+    }
+    ExitCode::SUCCESS
 }
 
 /// A filesystem-safe report basename: the package name if known, else the file stem.
@@ -1197,6 +1389,7 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
 
         print_header(&format!("{pkg}  ({remote})"), "apk");
         let mut result = scanner::scan::<fn(&models::Finding)>(&local, None);
+        result.findings.extend(adb_checks::stalkerware_cert_findings(&local));
         if !args.no_runtime {
             let rt = adb_checks::runtime_findings(&mut phone, pkg);
             result.findings.extend(rt);
@@ -1257,5 +1450,15 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod par_tests {
+    #[test]
+    fn par_map_keeps_order() {
+        let v: Vec<u64> = (0..1000).collect();
+        assert_eq!(super::par_map(&v, |x| x * 2), v.iter().map(|x| x * 2).collect::<Vec<_>>());
+        assert!(super::par_map(&Vec::<u8>::new(), |x| *x).is_empty());
     }
 }

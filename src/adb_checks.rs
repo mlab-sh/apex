@@ -13,7 +13,7 @@
 
 use crate::device::Phone;
 use crate::models::{Finding, Severity};
-use crate::stalkerware_iocs::STALKERWARE_PACKAGES;
+use crate::stalkerware_iocs::{STALKERWARE_CERTS, STALKERWARE_PACKAGES};
 use chrono::{Local, NaiveDate};
 use serde_json::json;
 
@@ -32,6 +32,25 @@ pub fn stalkerware_package_finding(pkg: &str) -> Finding {
         Severity::Critical,
         "stalkerware",
     )
+}
+
+/// Critical finding when an APK is signed by a known stalkerware certificate.
+/// Catches renamed / repackaged builds that the package-name match misses.
+pub fn stalkerware_cert_findings(apk: &std::path::Path) -> Vec<Finding> {
+    crate::cert_util::apk_signer_sha1s(apk)
+        .into_iter()
+        .filter(|c| STALKERWARE_CERTS.contains(&c.as_str()))
+        .map(|c| {
+            Finding::new(
+                "PKG_STALKERWARE_CERT",
+                "Signed with a known stalkerware certificate",
+                format!("The APK's signing certificate (SHA-1 {c}) belongs to a known stalkerware vendor (Echap indicators). This holds even if the package was renamed. Investigate carefully before removal in case of an abusive context."),
+                Severity::Critical,
+                "stalkerware",
+            )
+            .meta("cert_sha1", json!(c))
+        })
+        .collect()
 }
 
 /// One aggregate finding if any installed package matches the stalkerware set.
@@ -362,7 +381,7 @@ pub fn collect_posture(phone: &mut Phone) -> Result<Posture, String> {
 
 /// Known legitimate app-store installer package names. An app installed by
 /// anything else (or by nothing) is treated as sideloaded.
-const KNOWN_STORES: &[&str] = &[
+pub const KNOWN_STORES: &[&str] = &[
     "com.android.vending",           // Google Play
     "com.google.android.feedback",   // Play (legacy)
     "com.amazon.venezia",            // Amazon Appstore
@@ -677,7 +696,7 @@ MIUIOP(10002): allow\n";
 /// Best-effort extraction of active device-admin component names from a grepped
 /// `dumpsys device_policy` slice. Format varies across OEMs/versions, so we pull
 /// any `package/Component` token from admin/owner lines.
-fn parse_device_admins(s: &str) -> Vec<String> {
+pub fn parse_device_admins(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in s.lines() {
         for tok in line.split_whitespace() {

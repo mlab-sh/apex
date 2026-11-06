@@ -250,7 +250,12 @@ fn check_firebase(strings: &[String], rel_path: &str) -> Vec<Finding> {
 fn check_urls_domains(strings: &[String], rel_path: &str) -> Vec<Finding> {
     let all_text = strings.join("\n");
     let url_re = rx(r#"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{4,}"#);
-    let ip_re = rx(r#"\b(?:\d{1,3}\.){3}\d{1,3}\b"#);
+    // No `\b`: fancy-regex 0.13 treats word boundaries as "hard" and runs them in
+    // its backtracking VM (10+ min on a 140 MB Instagram split). Without them the
+    // pattern goes to the linear regex engine; boundaries are checked by hand below.
+    let ip_re = rx(r#"(?:\d{1,3}\.){3}\d{1,3}"#);
+    let bytes = all_text.as_bytes();
+    let is_word = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
 
     let mut urls: Vec<String> = url_re
         .find_iter(&all_text)
@@ -262,6 +267,7 @@ fn check_urls_domains(strings: &[String], rel_path: &str) -> Vec<Finding> {
     let mut ips: Vec<String> = ip_re
         .find_iter(&all_text)
         .flatten()
+        .filter(|m| !(m.start() > 0 && is_word(m.start() - 1)) && !is_word(m.end()))
         .map(|m| m.as_str().to_string())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -446,4 +452,17 @@ fn emit_checksec_summary(all: &[Checksec]) -> Vec<Finding> {
     );
 
     findings
+}
+
+#[cfg(test)]
+mod ip_tests {
+    use super::*;
+
+    #[test]
+    fn hardcoded_ips_respect_word_boundaries() {
+        let s = vec!["dns 8.8.4.4, v1.2.3.4x a10.0.0.1 _9.9.9.9 192.168.1.20".to_string()];
+        let f = check_urls_domains(&s, "lib/x.so");
+        let ips = f.iter().find(|f| f.id == "BIN_HARDCODED_IPS").unwrap();
+        assert_eq!(ips.metadata["ips"], json!(["192.168.1.20", "8.8.4.4"]));
+    }
 }

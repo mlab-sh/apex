@@ -187,3 +187,92 @@ fn bytes_to_decimal(bytes: &[u8]) -> String {
         trimmed.to_string()
     }
 }
+
+/// Uppercase-hex SHA-1 of every signing certificate of an APK (the digest
+/// `apksigner verify --print-certs` shows, and what Echap's IOCs use).
+/// Reads v1 (`META-INF/*.RSA|DSA|EC`) and the v2/v3 APK Signing Block, so
+/// v2/v3-only APKs (most modern apps) are covered too.
+pub fn apk_signer_sha1s(apk: &std::path::Path) -> Vec<String> {
+    use sha1::{Digest, Sha1};
+    let data = match std::fs::read(apk) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut ders: Vec<Vec<u8>> = signing_block_certs(&data);
+    if let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(&data)) {
+        for i in 0..zip.len() {
+            let Ok(mut f) = zip.by_index(i) else { continue };
+            let name = f.name().to_ascii_uppercase();
+            if name.starts_with("META-INF/")
+                && (name.ends_with(".RSA") || name.ends_with(".DSA") || name.ends_with(".EC"))
+            {
+                let mut raw = Vec::new();
+                if std::io::Read::read_to_end(&mut f, &mut raw).is_ok() {
+                    ders.extend(parse_pkcs7(&raw).into_iter().map(|c| c.der));
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = ders
+        .iter()
+        .map(|d| Sha1::digest(d).iter().map(|b| format!("{b:02X}")).collect())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// DER certificates from the v2/v3/v3.1 signers in the APK Signing Block.
+fn signing_block_certs(data: &[u8]) -> Vec<Vec<u8>> {
+    const IDS: [u32; 3] = [0x7109_871a, 0xf053_68c0, 0x1b93_ad61];
+    let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let u64_at = |o: usize| data.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+    let mut out = Vec::new();
+    // EOCD → central directory offset → "APK Sig Block 42" just before it.
+    let Some(eocd) = data.windows(4).rposition(|w| w == [0x50, 0x4b, 0x05, 0x06]) else { return out };
+    let Some(cd) = u32_at(eocd + 16) else { return out };
+    if cd < 24 || data.get(cd - 16..cd) != Some(b"APK Sig Block 42") {
+        return out;
+    }
+    let Some(size) = u64_at(cd - 24) else { return out };
+    let Some(start) = cd.checked_sub(size).and_then(|v| v.checked_sub(8)) else { return out };
+    let (mut pos, end) = (start + 8, cd - 24);
+    while pos + 12 <= end {
+        let (Some(len), Some(id)) = (u64_at(pos), u32_at(pos + 8)) else { break };
+        let Some(next) = pos.checked_add(8 + len) else { break };
+        if IDS.contains(&(id as u32)) {
+            if let Some(v) = data.get(pos + 12..next.min(end)) {
+                // signers (lp) → signer (lp) → signed data (lp) → digests (lp), certificates (lp) → cert (lp)
+                for signer in lp_items(v.get(4..).unwrap_or_default()) {
+                    let Some(signed) = lp_items(signer).into_iter().next() else { continue };
+                    let mut parts = lp_items(signed).into_iter();
+                    let _digests = parts.next();
+                    if let Some(certs) = parts.next() {
+                        // Keep only blobs that really decode as X.509 (guards against misparse).
+                        out.extend(
+                            lp_items(certs)
+                                .into_iter()
+                                .filter(|c| x509_cert::Certificate::from_der(c).is_ok())
+                                .map(|c| c.to_vec()),
+                        );
+                    }
+                }
+            }
+        }
+        pos = next;
+    }
+    out
+}
+
+/// Split a buffer of u32-LE-length-prefixed items. Stops at the first malformed item.
+fn lp_items(mut buf: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while buf.len() >= 4 {
+        let n = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
+        let Some(item) = buf.get(4..4 + n) else { break };
+        out.push(item);
+        buf = &buf[4 + n..];
+    }
+    out
+}
+

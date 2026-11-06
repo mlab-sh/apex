@@ -24,6 +24,7 @@ goblin = "0.8"
 walkdir = "2"
 tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
 cms = "0.2"
 x509-cert = "0.2"
 const-oid = { version = "0.9", features = ["db"] }
