@@ -24,7 +24,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn alteration_notes() -> Vec<&'static str> {
     vec![
         "Acquisition is LIVE: the device is powered on and USB debugging is authorized. Connecting and running shell commands alters volatile state (spawns shell processes, updates usage statistics and logs).",
-        "APEX issues only read-oriented commands (getprop, getenforce, settings get, pm list, pm path, dumpsys, cmd appops get) and file pulls. It writes no data to the device and installs nothing.",
+        "APEX issues read-oriented commands (getprop, getenforce, settings get/list, pm list, pm path, dumpsys, cmd, ps, ls, cat /proc/net/*, logcat -d) and file pulls. It installs nothing and changes no setting.",
+        "`device acquire` writes to the device in two places only: `bugreportz` leaves its zip in the shell user's bugreports directory (not deleted), and the screenshot is written to /data/local/tmp/apex_screen.png, pulled, then removed (skip with --no-screenshot / --no-bugreport). Both are visible in audit.jsonl.",
         "Every command issued is recorded in audit.jsonl with a UTC timestamp and the SHA-256 of its raw output; acquired files are hashed on pull.",
         "This is NOT a forensic image: it does not capture app-private data (/data/data), deleted content, or a physical/file-system image. Use a validated acquisition tool for evidential imaging.",
     ]
@@ -48,6 +49,7 @@ pub fn write_offline_evidence(
     started_utc: &str,
     inputs: Vec<Value>,
     report_paths: &[PathBuf],
+    case: Value,
 ) -> Result<(PathBuf, String), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
@@ -78,6 +80,7 @@ pub fn write_offline_evidence(
             "input_count": inputs.len(),
         }),
     );
+    manifest.insert("case".into(), case);
     manifest.insert("methodology".into(), json!(offline_notes()));
     manifest.insert("inputs".into(), json!(inputs));
     manifest.insert("reports".into(), json!(reports));
@@ -104,7 +107,7 @@ pub fn write_evidence(
     device: Value,
     report_paths: &[PathBuf],
     collected: Vec<Value>,
-    adb_key: Option<&Path>,
+    case: Value,
 ) -> Result<(PathBuf, String), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
@@ -160,11 +163,12 @@ pub fn write_evidence(
         json!({
             "started_utc": phone.session_start_utc(),
             "ended_utc": chrono::Utc::now().to_rfc3339(),
-            "transport": "adb_client USB (direct, no adb server)",
-            "adb_key": adb_key.map(|p| p.display().to_string()),
+            "transport": format!("adb_client {} (direct, no adb server)", phone.transport),
+            "adb_key": phone.adb_key.display().to_string(),
             "command_count": phone.audit().len(),
         }),
     );
+    manifest.insert("case".into(), case);
     manifest.insert("device".into(), device);
     manifest.insert("methodology".into(), json!(alteration_notes()));
     manifest.insert("artifacts".into(), json!(artifacts));

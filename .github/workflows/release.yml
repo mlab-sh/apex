@@ -150,7 +150,7 @@ jobs:
           mkdir -p Formula
           cat > Formula/apex.rb <<EOF
           class Apex < Formula
-            desc "Static analysis for APK/IPA/AAB packages (mlab.sh)"
+            desc "Android app analysis and phone investigation (mlab.sh)"
             homepage "https://github.com/mlab-sh/apex"
             version "${VERSION}"
             license "GPL-3.0-only"

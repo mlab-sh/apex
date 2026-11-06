@@ -223,6 +223,13 @@ pub struct Case {
     /// User-installed packages (`pm list packages -3`). Not "path under /data":
     /// Play-updated system apps (GMS, WebView…) live there too.
     pub third_party: HashSet<String>,
+    /// Third-party apps of the main user only (`third_party` adds other users').
+    pub third_party_main: HashSet<String>,
+    /// `pm list users`, and each non-primary user's third-party apps.
+    pub users: Vec<crate::history::User>,
+    pub profile_apps: BTreeMap<u32, BTreeSet<String>>,
+    /// System packages (`pm list packages -s -u`): shipped with the firmware.
+    pub system: HashSet<String>,
     pub launchable: Option<HashSet<String>>,
     pub accessibility: HashSet<String>,
     pub notif_listeners: HashSet<String>,
@@ -278,7 +285,7 @@ impl Case {
                 .and_then(|v| v.trim_end_matches(']').parse::<chrono_tz::Tz>().ok())
         });
 
-        let third_party = match read(root, "device/packages_3.txt") {
+        let third_party_main: HashSet<String> = match read(root, "device/packages_3.txt") {
             Some(t) => parse_packages(&t).into_iter().map(|p| p.name).collect(),
             // Older cases: acquire pulled exactly the third-party apps into apps/.
             None => std::fs::read_dir(root.join("apps"))
@@ -286,10 +293,24 @@ impl Case {
                 .unwrap_or_default(),
         };
 
+        let system: HashSet<String> = match read(root, "device/packages_system.txt") {
+            Some(t) => parse_packages(&t).into_iter().map(|p| p.name).collect(),
+            // Older cases: anything not living under /data shipped with the firmware.
+            None => packages.iter().filter(|p| !p.path.is_empty() && !p.path.starts_with("/data/")).map(|p| p.name.clone()).collect(),
+        };
+
+        let (users, profile_apps) = crate::history::load_users(root);
+        let mut third_party = third_party_main.clone();
+        third_party.extend(profile_apps.values().flatten().cloned());
+
         Case {
             root: root.to_path_buf(),
             tz,
             third_party,
+            third_party_main,
+            users,
+            profile_apps,
+            system,
             packages,
             launchable,
             accessibility: setting_packages(&secure, "enabled_accessibility_services"),
@@ -306,8 +327,28 @@ impl Case {
         self.packages.iter().map(|p| p.name.clone()).collect()
     }
 
-    fn sideloaded(&self, p: &Pkg) -> bool {
-        !p.installer.as_deref().is_some_and(|i| crate::adb_checks::KNOWN_STORES.contains(&i))
+    /// Installed by hand: through a package-installer UI, by another user app,
+    /// or with no installer at all (adb). Not sideloaded: app stores, and system /
+    /// OEM components installing preloads (e.g. `android` during setup).
+    pub fn sideloaded(&self, p: &Pkg) -> bool {
+        match p.installer.as_deref() {
+            Some(i) if crate::adb_checks::KNOWN_STORES.contains(&i) => false,
+            Some(i) if i.ends_with("packageinstaller") => true,
+            Some(i) => !(i == "android" || self.system.contains(i)),
+            // No installer: adb, or a preload shipped in the userdata image.
+            None => !is_preload_path(&p.path, &p.name),
+        }
+    }
+
+    /// Epoch milliseconds → device-local `YYYY-MM-DD HH:MM:SS.fff`.
+    pub fn local_from_epoch_ms(&self, ms: i64) -> Option<String> {
+        let utc = chrono::DateTime::from_timestamp_millis(ms)?;
+        let local = match (self.tz, &self.utc_offset) {
+            (Some(tz), _) => utc.with_timezone(&tz).naive_local(),
+            (None, Some(o)) => utc.with_timezone(&chrono::FixedOffset::from_str_offset(o)?).naive_local(),
+            (None, None) => utc.naive_utc(),
+        };
+        Some(local.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
     }
 
     /// Investigation findings for the whole case.
@@ -343,7 +384,7 @@ impl Case {
                 (self.admins.contains(&p.name), 3, "active device admin"),
                 (self.notif_listeners.contains(&p.name), 2, "notification listener enabled"),
                 (hidden, 2, "no launcher icon (hidden)"),
-                (side, 1, "installed outside a known store"),
+                (side, 1, "sideloaded (package installer, another app or adb)"),
                 (ops.is_some(), 1, "used sensitive permissions"),
             ] {
                 if on {
@@ -417,7 +458,12 @@ impl Case {
             );
         }
 
-        out.extend(ioc_findings(&iocs.scan_dir(&self.root, &self.package_names())));
+        let (p1, net_hits) = crate::artifacts::findings(self, iocs);
+        out.extend(p1);
+        out.extend(crate::history::findings(self, iocs));
+        let mut hits = iocs.scan_dir(&self.root, &self.package_names());
+        hits.extend(net_hits);
+        out.extend(ioc_findings(&hits));
         out
     }
 
@@ -453,6 +499,8 @@ impl Case {
             let now = self.capture_local.unwrap_or_else(|| chrono::Local::now().naive_local());
             ev.extend(parse_logcat(&t, now.year(), now.month()));
         }
+        ev.extend(crate::artifacts::events(self));
+        ev.extend(crate::history::events(self));
         ev.sort_by(|a, b| a.local.cmp(&b.local).then(a.message.cmp(&b.message)));
         // appops lists one access under several states/attribution tags.
         ev.dedup_by(|a, b| a.local == b.local && a.desc == b.desc && a.package == b.package && a.message == b.message);
@@ -546,6 +594,14 @@ mod tests {
     }
 
     #[test]
+    fn preload_vs_runtime_install_paths() {
+        assert!(is_preload_path("/data/app/Podcasts/base.apk", "com.google.android.apps.podcasts"));
+        assert!(!is_preload_path("/data/app/~~STaw==/com.x-n_Rh==/base.apk", "com.x"));
+        assert!(!is_preload_path("/data/app/com.x-1/base.apk", "com.x"));
+        assert!(!is_preload_path("/system/app/X/X.apk", "com.x"));
+    }
+
+    #[test]
     fn launcher_and_settings() {
         let l = parse_launchable("  ActivityInfo:\n    packageName=com.a\n    packageName=com.b extra\n");
         assert!(l.contains("com.a") && l.contains("com.b"));
@@ -617,5 +673,28 @@ mod tests {
         let p = f.iter().find(|f| f.id == "CASE_STALKERWARE_PROFILE").expect("profile finding");
         assert_eq!(p.severity, Severity::High); // 3 + 2 + 2 + 1 = 8
         assert!(!f.iter().any(|f| f.title.contains("com.ok")));
+    }
+}
+
+/// A preload shipped in the OEM's userdata image lives in a plain directory
+/// (`/data/app/Podcasts/`). Anything installed at runtime gets a generated one:
+/// `/data/app/~~<hash>==/<pkg>-<hash>==/` (Android 11+) or `/data/app/<pkg>-<n>/`.
+pub fn is_preload_path(path: &str, pkg: &str) -> bool {
+    match path.strip_prefix("/data/app/").and_then(|r| r.split('/').next()) {
+        Some(dir) => !(dir.starts_with("~~") || dir.starts_with(&format!("{pkg}-"))),
+        None => false,
+    }
+}
+
+/// "+01:00" → FixedOffset.
+trait FromStrOffset: Sized {
+    fn from_str_offset(s: &str) -> Option<Self>;
+}
+
+impl FromStrOffset for chrono::FixedOffset {
+    fn from_str_offset(s: &str) -> Option<Self> {
+        let sign = if s.starts_with('-') { -1 } else { 1 };
+        let (h, m) = s.trim_start_matches(['+', '-']).split_once(':')?;
+        chrono::FixedOffset::east_opt(sign * (h.parse::<i32>().ok()? * 3600 + m.parse::<i32>().ok()? * 60))
     }
 }

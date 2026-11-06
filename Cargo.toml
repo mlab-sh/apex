@@ -2,7 +2,7 @@
 name = "apex"
 version = "1.1.0"
 edition = "2021"
-description = "APEX — Static analysis for APK/IPA (mlab.sh), Rust edition"
+description = "APEX — Android app analysis and phone investigation (mlab.sh)"
 license = "GPL-3.0-only"
 
 [[bin]]
@@ -17,7 +17,7 @@ sha1 = "0.10"
 md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-fancy-regex = "0.13"
+fancy-regex = "0.20"
 axmldecoder = "0.5"
 roxmltree = "0.20"
 goblin = "0.8"
@@ -32,6 +32,7 @@ der = "0.7"
 rsa = "0.9"
 unicode-width = "0.1"
 adb_client = { version = "3.2.2", default-features = false, features = ["usb"] }
+rusb = "0.9"
 
 [profile.release]
 opt-level = 3

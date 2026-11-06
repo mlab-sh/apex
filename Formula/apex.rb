@@ -1,5 +1,5 @@
 class Apex < Formula
-  desc "Static analysis for APK/IPA/AAB packages (mlab.sh)"
+  desc "Android app analysis and phone investigation (mlab.sh)"
   homepage "https://github.com/mlab-sh/apex"
   version "1.1.0"
   license "GPL-3.0-only"

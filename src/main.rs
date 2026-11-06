@@ -2,14 +2,18 @@
 
 mod adb_checks;
 mod analyzers;
+mod artifacts;
 mod case;
 mod cert_util;
 mod device;
+mod diff;
 mod elf_util;
 mod evidence;
+mod history;
 mod ioc;
 mod models;
 mod output;
+mod report;
 mod scanner;
 mod stalkerware_iocs;
 mod util;
@@ -27,8 +31,8 @@ const SEVERITY_ORDER: [&str; 5] = ["critical", "high", "medium", "low", "info"];
 #[derive(Parser)]
 #[command(
     name = "apex",
-    version = "0.1.0",
-    about = "APEX — Static analysis for APK/IPA (mlab.sh)"
+    version,
+    about = "APEX — Android app analysis and phone investigation (mlab.sh)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -47,6 +51,39 @@ enum Command {
     Device(DeviceArgs),
     /// Build a unified timeline (CSV or JSONL) from a `device acquire` case
     Timeline(TimelineArgs),
+    /// Compare two `device acquire` cases of the same phone (what changed)
+    Diff(DiffArgs),
+    /// Write a self-contained HTML case report from a `device acquire` case
+    Report(ReportArgs),
+}
+
+#[derive(clap::Args)]
+struct DiffArgs {
+    /// Earlier case directory
+    old: PathBuf,
+    /// Later case directory
+    new: PathBuf,
+    /// STIX2 indicator bundle to match in both cases (repeatable)
+    #[arg(long = "iocs")]
+    iocs: Vec<PathBuf>,
+    /// Emit the diff as JSON (to -o, or stdout)
+    #[arg(long = "json")]
+    json_output: bool,
+    /// JSON output file
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct ReportArgs {
+    /// Case directory written by `apex device acquire`
+    case: PathBuf,
+    /// STIX2 indicator bundle to match (repeatable)
+    #[arg(long = "iocs")]
+    iocs: Vec<PathBuf>,
+    /// Output file (default: <case>/report.html)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -66,6 +103,8 @@ struct VerifyArgs {
 
 #[derive(clap::Args)]
 struct AnalyzeArgs {
+    #[command(flatten)]
+    case: CaseMetaArgs,
     /// Extraction directory to analyze (recursively) — or a single package file
     path: PathBuf,
     /// Also match this newline-separated list of installed package names against
@@ -119,9 +158,10 @@ enum DeviceAction {
 
 #[derive(clap::Args)]
 struct DevicePostureArgs {
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    #[command(flatten)]
+    case: CaseMetaArgs,
+    #[command(flatten)]
+    conn: ConnArgs,
     /// Emit the posture report as JSON
     #[arg(long = "json")]
     json_output: bool,
@@ -139,14 +179,59 @@ struct DevicePostureArgs {
     fail_on: Option<FailLevel>,
 }
 
+/// How to reach the phone (shared by every `device` subcommand).
+#[derive(clap::Args, Clone)]
+struct ConnArgs {
+    /// Path to a custom ADB private key (default: ~/.android/adbkey)
+    #[arg(long = "adb-key")]
+    adb_key: Option<PathBuf>,
+    /// USB serial of the phone to use when several are plugged in
+    #[arg(long, conflicts_with = "tcp")]
+    serial: Option<String>,
+    /// Connect over the network instead of USB: HOST[:PORT] (after `adb tcpip 5555`)
+    #[arg(long)]
+    tcp: Option<String>,
+}
+
+impl ConnArgs {
+    fn connect(&self) -> Result<device::Phone, String> {
+        device::Phone::connect(self.adb_key.clone(), self.serial.as_deref(), self.tcp.as_deref())
+    }
+}
+
+/// Case / examiner metadata recorded in the evidence manifest and the report.
+#[derive(clap::Args, Clone, Default)]
+struct CaseMetaArgs {
+    /// Case or exhibit reference (e.g. "2026-0142 / exhibit 3")
+    #[arg(long = "case-id")]
+    case_id: Option<String>,
+    /// Name of the examiner running APEX
+    #[arg(long)]
+    examiner: Option<String>,
+    /// Free-text note (legal basis, context, chain of custody)
+    #[arg(long = "case-notes")]
+    case_notes: Option<String>,
+}
+
+impl CaseMetaArgs {
+    fn to_json(&self) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in [("case_id", &self.case_id), ("examiner", &self.examiner), ("notes", &self.case_notes)] {
+            if let Some(v) = v {
+                m.insert(k.into(), serde_json::json!(v));
+            }
+        }
+        serde_json::Value::Object(m)
+    }
+}
+
 #[derive(clap::Args)]
 struct DeviceShellArgs {
     /// The shell command to run (e.g. "getprop ro.build.version.sdk")
     #[arg(required = true, num_args = 1..)]
     command: Vec<String>,
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    #[command(flatten)]
+    conn: ConnArgs,
 }
 
 #[derive(clap::Args)]
@@ -157,13 +242,14 @@ struct DeviceDumpArgs {
     /// Output directory (default: ./apex_dump)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    #[command(flatten)]
+    conn: ConnArgs,
 }
 
 #[derive(clap::Args)]
 struct DeviceAcquireArgs {
+    #[command(flatten)]
+    case: CaseMetaArgs,
     /// Output directory (default: ./apex_acquire)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
@@ -179,9 +265,15 @@ struct DeviceAcquireArgs {
     /// Skip the full bugreport (slow: 1-5 min, 10-100 MB)
     #[arg(long = "no-bugreport")]
     no_bugreport: bool,
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    /// Skip the screenshot of the current screen
+    #[arg(long = "no-screenshot")]
+    no_screenshot: bool,
+    /// Capture notification *content* (titles, message previews) instead of the
+    /// redacted dump. Message content is legally sensitive: only with a mandate.
+    #[arg(long = "notification-content")]
+    notification_content: bool,
+    #[command(flatten)]
+    conn: ConnArgs,
 }
 
 #[derive(clap::Args)]
@@ -196,19 +288,19 @@ struct DeviceListenArgs {
 
 #[derive(clap::Args)]
 struct DeviceCommonArgs {
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    #[command(flatten)]
+    conn: ConnArgs,
 }
 
 #[derive(clap::Args)]
 struct DeviceScanArgs {
+    #[command(flatten)]
+    case: CaseMetaArgs,
     /// Scan only this package (default: every third-party app)
     #[arg(long)]
     package: Option<String>,
-    /// Path to a custom ADB private key (default: ~/.android/adbkey)
-    #[arg(long = "adb-key")]
-    adb_key: Option<PathBuf>,
+    #[command(flatten)]
+    conn: ConnArgs,
     /// Write a JSON report per app
     #[arg(long = "json")]
     json_output: bool,
@@ -278,6 +370,8 @@ fn main() -> ExitCode {
         Command::Analyze(args) => run_analyze(args),
         Command::Verify(args) => run_verify(args),
         Command::Timeline(args) => run_timeline(args),
+        Command::Diff(args) => run_diff(args),
+        Command::Report(args) => run_report(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -294,8 +388,7 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
     use models::{security_score, severity_counts, Severity};
     use serde_json::{json, Value};
 
-    let adb_key = args.adb_key.clone();
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -408,7 +501,7 @@ fn run_device_posture(args: DevicePostureArgs) -> ExitCode {
             Value::Object(info),
             &[report_path],
             Vec::new(),
-            adb_key.as_deref(),
+            args.case.to_json(),
         ) {
             Ok((mpath, sha)) => {
                 println!("\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
@@ -470,8 +563,7 @@ fn acquire_save(
 fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     use serde_json::json;
 
-    let adb_key = args.adb_key.clone();
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -496,9 +588,40 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     println!("\x1b[2m  device metadata…\x1b[0m");
     // First, so the device clock is read right next to the host timestamp in the audit log.
     acquire_save(&mut phone, "date '+%Y-%m-%dT%H:%M:%S%z'", &device_dir.join("clock.txt"), &out, &mut collected);
+    // Volatile state next, before our own activity adds processes, sockets or files.
+    acquire_save(&mut phone, "ps -A -o USER,PID,PPID,NAME,ARGS", &device_dir.join("processes.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "ls -l /proc/[0-9]*/exe 2>/dev/null", &device_dir.join("proc_exe.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "cat /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6", &device_dir.join("net_sockets.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "ls -laR /data/local/tmp", &device_dir.join("local_tmp.txt"), &out, &mut collected);
+    if !args.no_screenshot {
+        // Written to the shell's scratch dir, pulled (hashed in the audit log), then removed.
+        let remote = "/data/local/tmp/apex_screen.png";
+        if phone.run(&format!("screencap -p {remote}")).is_ok() {
+            if let Err(e) = phone.pull(remote, &device_dir.join("screen.png")) {
+                eprintln!("\x1b[33m[warn] screenshot: {e}\x1b[0m");
+            }
+            let _ = phone.run(&format!("rm -f {remote}"));
+        }
+    }
     acquire_save(&mut phone, "getprop", &device_dir.join("getprop.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -f -i -u", &device_dir.join("packages.txt"), &out, &mut collected);
     acquire_save(&mut phone, "pm list packages -3", &device_dir.join("packages_3.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "pm list packages -s -u", &device_dir.join("packages_system.txt"), &out, &mut collected);
+    acquire_save(&mut phone, "pm list packages -U", &device_dir.join("packages_uid.txt"), &out, &mut collected);
+    // Other users / work profile / clone space: their apps are not in the lists above.
+    acquire_save(&mut phone, "pm list users", &device_dir.join("users.txt"), &out, &mut collected);
+    let users = std::fs::read_to_string(device_dir.join("users.txt")).map(|t| history::parse_users(&t)).unwrap_or_default();
+    let mut profile_only: Vec<(String, u32)> = Vec::new();
+    for u in users.iter().filter(|u| u.id != 0) {
+        let file = device_dir.join(format!("packages_3_user{}.txt", u.id));
+        acquire_save(&mut phone, &format!("pm list packages -3 --user {}", u.id), &file, &out, &mut collected);
+        let main: std::collections::HashSet<String> = std::fs::read_to_string(device_dir.join("packages_3.txt")).map(|t| case::parse_packages(&t).into_iter().map(|p| p.name).collect()).unwrap_or_default();
+        for p in std::fs::read_to_string(&file).map(|t| case::parse_packages(&t)).unwrap_or_default() {
+            if !main.contains(&p.name) && !profile_only.iter().any(|(n, _)| *n == p.name) {
+                profile_only.push((p.name, u.id));
+            }
+        }
+    }
     acquire_save(&mut phone, "dumpsys account", &device_dir.join("accounts.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
@@ -514,6 +637,31 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     );
     for ns in ["secure", "global", "system"] {
         acquire_save(&mut phone, &format!("settings list {ns}"), &device_dir.join(format!("settings_{ns}.txt")), &out, &mut collected);
+    }
+
+    println!("\x1b[2m  services, roles, network, sensors, storage…\x1b[0m");
+    let notif_cmd = if args.notification_content { "dumpsys notification --noredact" } else { "dumpsys notification" };
+    for (cmd, file) in [
+        ("dumpsys activity services", "activity_services.txt"),
+        ("dumpsys activity recents", "activity_recents.txt"),
+        ("dumpsys activity broadcasts", "activity_broadcasts.txt"),
+        ("dumpsys dbinfo", "dbinfo.txt"),
+        ("dumpsys netstats --full --uid", "netstats.txt"),
+        ("dumpsys package messages", "package_messages.txt"),
+        (notif_cmd, "notification.txt"),
+        ("dumpsys jobscheduler", "jobscheduler.txt"),
+        ("dumpsys alarm", "alarm.txt"),
+        ("dumpsys role", "role.txt"),
+        ("dumpsys input_method", "input_method.txt"),
+        ("dumpsys connectivity", "connectivity.txt"),
+        ("dumpsys vpn_management", "vpn_management.txt"),
+        ("dumpsys media.camera", "camera.txt"),
+        ("dumpsys media.audio_flinger", "audio.txt"),
+        ("dumpsys location", "location.txt"),
+        ("cmd wifi list-networks", "wifi_networks.txt"),
+        ("ls -laR /storage/emulated/0/", "sdcard_listing.txt"),
+    ] {
+        acquire_save(&mut phone, cmd, &device_dir.join(file), &out, &mut collected);
     }
     if !args.no_usagestats {
         println!("\x1b[2m  usage stats…\x1b[0m");
@@ -558,7 +706,10 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     let packages: Vec<String> = match &args.package {
         Some(p) => vec![p.clone()],
         None => match phone.list_third_party() {
-            Ok(p) => p,
+            Ok(mut p) => {
+                p.extend(profile_only.iter().map(|(n, _)| n.clone()));
+                p
+            }
             Err(e) => {
                 eprintln!("\x1b[31m{e}\x1b[0m");
                 return ExitCode::from(1);
@@ -573,7 +724,9 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             eprintln!("\x1b[33m[skip] {pkg}: {e}\x1b[0m");
             continue;
         }
-        let paths = phone.apk_paths(pkg).unwrap_or_default();
+        // Apps only installed in another user need that user's `pm path`.
+        let user = profile_only.iter().find(|(n, _)| n == pkg).map(|(_, u)| *u);
+        let paths = phone.apk_paths(pkg, user).unwrap_or_default();
         for remote in &paths {
             let base = remote.rsplit('/').next().unwrap_or("base.apk");
             let local = appdir.join(base);
@@ -588,7 +741,7 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     }
 
     // ---- Evidence bundle (audit trail auto-includes every pull + shell). ----
-    match evidence::write_evidence(&out, &phone, "device_acquire", identifiers, &[], collected, adb_key.as_deref()) {
+    match evidence::write_evidence(&out, &phone, "device_acquire", identifiers.clone(), &[], collected, args.case.to_json()) {
         Ok((mpath, sha)) => {
             println!(
                 "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) → {}\x1b[0m",
@@ -608,7 +761,7 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
 }
 
 fn run_device_shell(args: DeviceShellArgs) -> ExitCode {
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -705,16 +858,7 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
 
     let started_utc = chrono::Utc::now().to_rfc3339();
 
-    let mut iocs = ioc::IocSet::default();
-    for f in &args.iocs {
-        match iocs.load_stix2(f) {
-            Ok(n) => println!("\x1b[2mLoaded {n} indicator(s) from {}\x1b[0m", f.display()),
-            Err(e) => {
-                eprintln!("\x1b[31m{e}\x1b[0m");
-                return ExitCode::from(1);
-            }
-        }
-    }
+    let Some(iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
     if iocs.unsupported > 0 {
         eprintln!("\x1b[33m[warn] {} indicator comparison(s) of unsupported types ignored\x1b[0m", iocs.unsupported);
     }
@@ -974,6 +1118,7 @@ fn run_analyze(args: AnalyzeArgs) -> ExitCode {
             &started_utc,
             inputs_meta,
             &report_paths,
+            args.case.to_json(),
         ) {
             Ok((mpath, sha)) => {
                 println!("\n\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
@@ -1084,6 +1229,68 @@ fn run_timeline(args: TimelineArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_diff(args: DiffArgs) -> ExitCode {
+    for c in [&args.old, &args.new] {
+        if !case::Case::is_case(c) {
+            eprintln!("\x1b[31m{} is not a `device acquire` case (no device/packages.txt)\x1b[0m", c.display());
+            return ExitCode::from(1);
+        }
+    }
+    let Some(iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    let d = diff::diff(&case::Case::load(&args.old), &case::Case::load(&args.new), &iocs);
+    if args.json_output || args.output.is_some() {
+        let text = serde_json::to_string_pretty(&d).unwrap_or_default();
+        match &args.output {
+            Some(p) => {
+                if let Err(e) = std::fs::write(p, text) {
+                    eprintln!("\x1b[31mcannot write {}: {e}\x1b[0m", p.display());
+                    return ExitCode::from(1);
+                }
+                println!("\x1b[32m✓ Diff → {}\x1b[0m", p.display());
+            }
+            None => println!("{text}"),
+        }
+    } else {
+        diff::print(&d);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_report(args: ReportArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not a `device acquire` case (no device/packages.txt)\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let Some(iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    let c = case::Case::load(&args.case);
+    // Signing-certificate matches need the APKs; the rest comes from the case.
+    let apks: Vec<PathBuf> = c.third_party.iter().map(|p| args.case.join("apps").join(p).join("base.apk")).filter(|p| p.is_file()).collect();
+    let extra: Vec<models::Finding> = par_map(&apks, |a| adb_checks::stalkerware_cert_findings(a)).into_iter().flatten().collect();
+    let html = report::render(&c, &iocs, extra);
+    let out = args.output.unwrap_or_else(|| args.case.join("report.html"));
+    if let Err(e) = std::fs::write(&out, html) {
+        eprintln!("\x1b[31mcannot write {}: {e}\x1b[0m", out.display());
+        return ExitCode::from(1);
+    }
+    println!("\x1b[32m✓ Report → {}\x1b[0m", out.display());
+    ExitCode::SUCCESS
+}
+
+/// Load STIX2 indicator files; prints the counts, `None` (after printing why) on error.
+fn load_iocs(files: &[PathBuf]) -> Option<ioc::IocSet> {
+    let mut iocs = ioc::IocSet::default();
+    for f in files {
+        match iocs.load_stix2(f) {
+            Ok(n) => eprintln!("\x1b[2mLoaded {n} indicator(s) from {}\x1b[0m", f.display()),
+            Err(e) => {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+                return None;
+            }
+        }
+    }
+    Some(iocs)
+}
+
 /// A filesystem-safe report basename: the package name if known, else the file stem.
 fn pkg_or_stem(path: &Path, pkg: &str) -> String {
     if !pkg.is_empty() {
@@ -1120,12 +1327,9 @@ fn run_device_listen(args: DeviceListenArgs) -> ExitCode {
     let mut tick = 0usize;
 
     loop {
-        match device::detect_devices() {
+        match device::usb_devices() {
             Ok(devs) if !devs.is_empty() => {
-                let ids: Vec<String> = devs
-                    .iter()
-                    .map(|(v, p)| format!("{v:04x}:{p:04x}"))
-                    .collect();
+                let ids: Vec<String> = devs.into_iter().map(|(serial, _)| serial).collect();
                 // Clear the spinner line.
                 eprint!("\r\x1b[2K");
                 let _ = std::io::stderr().flush();
@@ -1164,7 +1368,7 @@ fn run_device_listen(args: DeviceListenArgs) -> ExitCode {
 }
 
 fn run_device_list(args: DeviceCommonArgs) -> ExitCode {
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -1205,7 +1409,7 @@ const DUMP_PROPS: &[(&str, &str)] = &[
 fn run_device_dump(args: DeviceDumpArgs) -> ExitCode {
     use serde_json::{json, Map, Value};
 
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -1316,8 +1520,7 @@ fn run_device_dump(args: DeviceDumpArgs) -> ExitCode {
 fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
     use serde_json::json;
 
-    let adb_key = args.adb_key.clone();
-    let mut phone = match device::Phone::connect(args.adb_key) {
+    let mut phone = match args.conn.connect() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("\x1b[31m{e}\x1b[0m");
@@ -1437,7 +1640,7 @@ fn run_device_scan(args: DeviceScanArgs) -> ExitCode {
             "security_patch": pick("ro.build.version.security_patch"),
             "build_fingerprint": pick("ro.build.fingerprint"),
         });
-        match evidence::write_evidence(dir, &phone, "device_scan", device, &report_paths, Vec::new(), adb_key.as_deref()) {
+        match evidence::write_evidence(dir, &phone, "device_scan", device, &report_paths, Vec::new(), args.case.to_json()) {
             Ok((mpath, sha)) => {
                 println!("\x1b[32m✓ Evidence bundle: {}\x1b[0m", dir.display());
                 println!("\x1b[2m  manifest: {}  (sha256 {})\x1b[0m", mpath.display(), &sha[..16]);

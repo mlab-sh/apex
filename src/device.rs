@@ -1,9 +1,11 @@
-//! Direct USB Android connector via `adb_client` (ADBUSBDevice).
+//! Direct Android connector via `adb_client`: USB (no adb server) or legacy
+//! ADB-over-TCP (`adb tcpip 5555`).
 //!
 //! Lists non-system (third-party) packages, resolves their APK paths, and
 //! pulls the APKs off the device so they can be scanned like local files.
 
-use adb_client::usb::{find_all_connected_adb_devices, ADBUSBDevice};
+use adb_client::tcp::ADBTcpDevice;
+use adb_client::usb::{ADBUSBDevice, USBTransport};
 use adb_client::ADBDeviceExt;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -53,12 +55,34 @@ impl AuditEntry {
     }
 }
 
-/// Detect ADB-capable USB devices without authenticating (reads USB
-/// descriptors only). Returns each device's (vendor_id, product_id).
-pub fn detect_devices() -> Result<Vec<(u16, u16)>, String> {
-    let devs = find_all_connected_adb_devices()
-        .map_err(|e| format!("USB scan failed: {e}"))?;
-    Ok(devs.iter().map(|d| (d.vendor_id, d.product_id)).collect())
+/// Same interface test as `adb_client` (vendor-specific 0x42/1, or bulk 0xdc/2/1).
+fn is_adb(dev: &rusb::Device<rusb::Context>, des: &rusb::DeviceDescriptor) -> bool {
+    (0..des.num_configurations()).filter_map(|n| dev.config_descriptor(n).ok()).any(|c| {
+        c.interfaces().flat_map(|i| i.descriptors().collect::<Vec<_>>()).any(|d| {
+            d.protocol_code() == 1
+                && ((d.class_code() == 0xff && d.sub_class_code() == 0x42) || (d.class_code() == 0xdc && d.sub_class_code() == 2))
+        })
+    })
+}
+
+/// ADB USB devices with their serial number (what `adb devices` shows).
+pub fn usb_devices() -> Result<Vec<(String, rusb::Device<rusb::Context>)>, String> {
+    use rusb::UsbContext;
+    let ctx = rusb::Context::new().map_err(|e| format!("USB scan failed: {e}"))?;
+    let mut out = Vec::new();
+    for dev in ctx.devices().map_err(|e| format!("USB scan failed: {e}"))?.iter() {
+        let Ok(des) = dev.device_descriptor() else { continue };
+        if !is_adb(&dev, &des) {
+            continue;
+        }
+        let serial = dev
+            .open()
+            .ok()
+            .and_then(|h| h.read_serial_number_string_ascii(&des).ok())
+            .unwrap_or_else(|| format!("{:04x}:{:04x}", des.vendor_id(), des.product_id()));
+        out.push((serial, dev));
+    }
+    Ok(out)
 }
 
 /// `~/.android/adbkey` (same path as the platform `adb`), created if missing.
@@ -87,7 +111,11 @@ fn default_adb_key() -> Result<PathBuf, String> {
 }
 
 pub struct Phone {
-    dev: ADBUSBDevice,
+    dev: Box<dyn ADBDeviceExt>,
+    /// How the device was reached, e.g. `usb serial=abc123` or `tcp 192.168.1.20:5555`.
+    pub transport: String,
+    /// Private key this host authenticated with.
+    pub adb_key: PathBuf,
     /// Tamper-evident record of every action taken against the device.
     log: Vec<AuditEntry>,
     /// UTC timestamp when the session (connection) was opened.
@@ -95,12 +123,44 @@ pub struct Phone {
 }
 
 impl Phone {
-    /// Autodetect and connect to the single attached ADB-USB device.
-    /// The phone must be in USB-debugging mode and authorized (RSA prompt).
-    pub fn connect(key: Option<PathBuf>) -> Result<Phone, String> {
+    /// Connect over USB (the single attached device, or the one whose serial is
+    /// `serial`) or, with `tcp`, to `host[:port]` (legacy `adb tcpip`, not the
+    /// TLS "wireless debugging" pairing). The phone must authorize the key.
+    pub fn connect(key: Option<PathBuf>, serial: Option<&str>, tcp: Option<&str>) -> Result<Phone, String> {
         let key = match key {
             Some(k) => k,
             None => default_adb_key()?,
+        };
+        // Pick the transport before the (blocking) handshake.
+        let target = match tcp {
+            Some(addr) => {
+                use std::net::ToSocketAddrs;
+                let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:5555") };
+                let sock = addr
+                    .to_socket_addrs()
+                    .map_err(|e| format!("bad --tcp address '{addr}': {e}"))?
+                    .next()
+                    .ok_or_else(|| format!("bad --tcp address '{addr}'"))?;
+                Err(sock)
+            }
+            None => {
+                let mut devs = usb_devices()?;
+                let i = match serial {
+                    Some(s) => devs.iter().position(|(sn, _)| sn == s).ok_or_else(|| {
+                        format!("no USB device with serial '{s}' (connected: {})", devs.iter().map(|d| d.0.as_str()).collect::<Vec<_>>().join(", "))
+                    })?,
+                    None if devs.is_empty() => return Err("no ADB USB device found: plug the phone in and enable USB debugging".into()),
+                    None if devs.len() > 1 => {
+                        return Err(format!(
+                            "{} ADB devices connected, pick one with --serial: {}",
+                            devs.len(),
+                            devs.iter().map(|d| d.0.as_str()).collect::<Vec<_>>().join(", ")
+                        ))
+                    }
+                    None => 0,
+                };
+                Ok(devs.swap_remove(i))
+            }
         };
         // The handshake blocks until the phone authorizes this key; say so, or a
         // pending "Allow USB debugging?" prompt looks like a hang.
@@ -112,11 +172,20 @@ impl Phone {
                 eprintln!("\x1b[33mWaiting for the phone: unlock it and accept \"Allow USB debugging?\" (tick \"Always allow\").\x1b[0m");
             }
         });
-        let dev = ADBUSBDevice::autodetect_with_custom_private_key(key);
+        let res: Result<(Box<dyn ADBDeviceExt>, String), String> = match target {
+            Ok((sn, dev)) => ADBUSBDevice::new_from_transport(USBTransport::new_from_device(dev), Some(key.clone()))
+                .map(|d| (Box::new(d) as Box<dyn ADBDeviceExt>, format!("usb serial={sn}")))
+                .map_err(|e| format!("ADB USB connection failed: {e}")),
+            Err(sock) => ADBTcpDevice::new_with_custom_private_key(sock, &key)
+                .map(|d| (Box::new(d) as Box<dyn ADBDeviceExt>, format!("tcp {sock}")))
+                .map_err(|e| format!("ADB TCP connection to {sock} failed: {e}")),
+        };
         waiting.store(false, std::sync::atomic::Ordering::Relaxed);
-        let dev = dev.map_err(|e| format!("ADB USB connection failed: {e}"))?;
+        let (dev, transport) = res?;
         Ok(Phone {
             dev,
+            transport,
+            adb_key: key,
             log: Vec::new(),
             session_start_utc: Utc::now().to_rfc3339(),
         })
@@ -208,8 +277,11 @@ impl Phone {
     }
 
     /// Resolve the on-device APK path(s) for a package.
-    pub fn apk_paths(&mut self, pkg: &str) -> Result<Vec<String>, String> {
-        let out = self.run(&format!("pm path {pkg}"))?;
+    pub fn apk_paths(&mut self, pkg: &str, user: Option<u32>) -> Result<Vec<String>, String> {
+        let out = match user {
+            Some(u) => self.run(&format!("pm path --user {u} {pkg}"))?,
+            None => self.run(&format!("pm path {pkg}"))?,
+        };
         let paths: Vec<String> = out
             .lines()
             .filter_map(|l| l.trim().strip_prefix("package:"))
@@ -221,7 +293,7 @@ impl Phone {
 
     /// Pick the primary (base) APK path for a package.
     pub fn base_apk_path(&mut self, pkg: &str) -> Result<Option<String>, String> {
-        let paths = self.apk_paths(pkg)?;
+        let paths = self.apk_paths(pkg, None)?;
         let base = paths
             .iter()
             .find(|p| p.ends_with("base.apk"))
