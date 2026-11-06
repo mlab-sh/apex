@@ -463,7 +463,9 @@ pub fn findings(case: &Case, iocs: &IocSet) -> (Vec<Finding>, Vec<Hit>) {
                 }
             }
             // A user app accepting connections from the network.
-            let listening = s.state == "LISTEN" || (s.proto == "udp" && s.state == "UNCONN");
+            // Unconnected UDP on an ephemeral port is a client socket (QUIC, WebRTC), not a server.
+            let ephemeral = s.local_port >= 32768;
+            let listening = s.state == "LISTEN" || (s.proto == "udp" && s.state == "UNCONN" && !ephemeral);
             let apps = uids.get(&s.uid).cloned().unwrap_or_default();
             if listening && s.local_ip.parse::<std::net::IpAddr>().is_ok_and(|a| !a.is_loopback()) && apps.iter().any(|p| third(p)) {
                 out.push(

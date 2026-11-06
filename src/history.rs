@@ -34,7 +34,9 @@ impl User {
         const RESTRICTED: u32 = 0x8;
         const MANAGED_PROFILE: u32 = 0x20;
         const PROFILE: u32 = 0x1000;
-        if self.flags & MANAGED_PROFILE != 0 {
+        if self.id == 0 {
+            "main user"
+        } else if self.flags & MANAGED_PROFILE != 0 {
             "work profile (managed)"
         } else if self.id == 999 || self.name.to_lowercase().contains("xspace") || self.name.to_lowercase().contains("clone") {
             "app clone space"

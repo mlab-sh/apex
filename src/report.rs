@@ -172,7 +172,7 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
     if !case.users.is_empty() {
         h.push_str("<h2>Users and profiles</h2><table><tr><th>ID</th><th>Name</th><th>Kind</th><th>Running</th></tr>");
         for u in &case.users {
-            let _ = write!(h, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", u.id, esc(&u.name), if u.id == 0 { "main user" } else { u.kind() }, if u.running { "yes" } else { "no" });
+            let _ = write!(h, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", u.id, esc(&u.name), u.kind(), if u.running { "yes" } else { "no" });
         }
         h.push_str("</table>");
     }
