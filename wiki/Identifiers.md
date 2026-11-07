@@ -32,4 +32,9 @@ apex identifiers ./case-42 --json -o identifiers.json
 The line number is only known if the SIM or the operator stored it; it is
 often missing.
 
+Android 13+ masks account names in `dumpsys account` (`abc***@gmail.com`).
+When the [APEX agent](Agent) ran, APEX replaces each masked name with the
+full one the agent read, for the accounts visible to it (Google, WhatsApp…);
+the others stay masked: the full ID comes from the operator.
+
 The same sheet is in the [HTML report](Report) and the [procès-verbal](PV).

@@ -15,7 +15,7 @@ communications (under mandate) and shared storage, with an
 | Disk space: ~1–2 GB (most of it APKs), plus the size of shared storage with `--storage` | the case is written to disk as it goes |
 | A mandate reference for `--mandate` and `--notification-content` | see [Legal scope](Legal-Scope) |
 | Someone at the phone for `--backup` | the backup must be confirmed on its screen, with an empty password |
-| No root, no app installed | nothing is required on the phone |
+| No root | the [agent](Agent) is installed for a few seconds and removed; on Xiaomi it needs *Install via USB* and *USB debugging (Security settings)* (Mi account), otherwise APEX goes on without it |
 
 ## Usage
 
@@ -37,6 +37,8 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
 | `--notification-content` | notifications unredacted (titles, message previews); only under mandate |
 | `--storage` | pull shared storage (`/sdcard`: photos, videos, downloads, messaging media), without `Android/data` and `Android/obb` |
 | `--backup` | Android backup (`bu backup -all -noapk`) of the apps that allow it; confirm on the phone with an **empty** password |
+| `--quick` | **shortest time plugged in**: APKs hashed on the phone (`sha256sum`) instead of pulled, no bugreport, logcat or usage-stats dump (the [agent](Agent) gives usage events and signing certificates). ≈ 40–60 s |
+| `--no-agent` | do not install the [APEX agent](Agent) |
 | `--package <PKG>` | acquire only this app (device state is still collected) |
 | `--no-bugreport` | skip the bugreport (1–5 min, 10–100 MB); loses battery history and some install history |
 | `--no-logcat`, `--no-usagestats`, `--no-screenshot` | skip those artifacts |
@@ -54,17 +56,20 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
 4. **Identity**: system properties, package lists, users and profiles,
    telephony identifiers (IMEI, IMSI, ICCID, line number) through read-only
    getters, settings.
-5. **History and state** (not in triage): Wi-Fi, Bluetooth, app-ops (permission
+5. **APEX agent** (unless `--no-agent`): installed, read, uninstalled, ≈ 8 s.
+   See [APEX agent](Agent).
+6. **History and state** (not in triage): Wi-Fi, Bluetooth, app-ops (permission
    use), launcher, ~25 `dumpsys` services including per-app network traffic and
    the package manager log, shared-storage file listing, usage stats, logcat,
    bugreport.
-6. **Under `--mandate`**: SMS, MMS and their attachments, call log, contacts,
+7. **Under `--mandate`**: SMS, MMS and their attachments, call log, contacts,
    calendar, WhatsApp backups (`.crypt14` / `.crypt15`) and Signal backups
    (`signal-*.backup`) from shared storage.
-7. **`--backup`, `--storage`** if asked.
-8. **Every third-party APK** (all splits) with its `dumpsys package`,
-   including apps installed only in another user or profile.
-9. **Evidence bundle**: `identifiers.json`, `manifest.json`,
+8. **`--backup`, `--storage`** if asked.
+9. **Every third-party APK** (all splits) with its `dumpsys package`,
+   including apps installed only in another user or profile; with `--quick`,
+   their SHA-256 computed on the phone (`apps/<pkg>/apk_sha256.txt`) instead.
+10. **Evidence bundle**: `identifiers.json`, `manifest.json`,
    `manifest.json.sha256`, `audit.jsonl`.
 
 The layout is on [Case directory](Case-Directory).
@@ -79,7 +84,9 @@ methodology statement:
   (`--no-screenshot` avoids it);
 - the bugreport zip, left in the shell user's bugreports directory
   (`--no-bugreport` avoids it);
-- with `--backup`, `/data/local/tmp/apex_backup.ab`, pulled, deleted.
+- with `--backup`, `/data/local/tmp/apex_backup.ab`, pulled, deleted;
+- the [APEX agent](Agent): installed, read, uninstalled. Its steps are listed
+  in the manifest's `phone_changes` and in the PV.
 
 Enabling developer options and USB debugging before the acquisition are your
 changes: declare them with `--phone-change`.
@@ -89,6 +96,7 @@ changes: declare them with `--phone-change`.
 | Mode | Time |
 |---|---|
 | `--triage` | ≈ 6–10 s |
+| `--quick` (agent included) | ≈ 40–60 s |
 | full, `--no-bugreport` | ≈ 1–5 min (APK count and size) |
 | full | + 1–5 min for the bugreport |
 | `--storage` | + ≈ 1 min per few hundred MB |
@@ -100,10 +108,17 @@ readable without root. It comes from a lab extraction through
 [`apex import`](Import). See [Communications and app data](Communications-and-App-Data)
 for what is reachable live and what needs an extraction.
 
+## With `--quick`
+
+Static analysis of the apps needs their APKs: run [`device scan`](Device) or a
+full acquisition later if you need it. Indicator matching still works: APK
+hashes from the phone, signing certificates from the agent.
+
 ## Next
 
 ```sh
 apex verify ./case-42
 apex analyze ./case-42 --iocs stalkerware.stix2
 apex identifiers ./case-42
+apex db ./case-42            # everything in one SQLite file
 ```

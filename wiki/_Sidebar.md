@@ -18,6 +18,7 @@
 - [import](Import)
 
 **Analysis**
+- [db](Db)
 - [analyze](Analyze)
 - [identifiers](Identifiers)
 - [comms](Comms)
@@ -37,6 +38,7 @@
 
 **Concepts**
 - [Case directory](Case-Directory)
+- [APEX agent](Agent)
 - [Evidence and integrity](Evidence-and-Integrity)
 - [Legal scope](Legal-Scope)
 - [Communications and app data](Communications-and-App-Data)

@@ -393,7 +393,9 @@ pub fn findings(case: &Case, iocs: &IocSet) -> Vec<Finding> {
     }
 
     // --- Install / uninstall history.
-    let changes = package_changes(case);
+    // APEX's own agent (installed and removed by the acquisition) is in the
+    // package manager log: in the timeline, not in the findings.
+    let changes: Vec<PkgChange> = package_changes(case).into_iter().filter(|c| c.package != crate::agent::PKG).collect();
     let installed: BTreeSet<&str> = case.packages.iter().map(|p| p.name.as_str()).collect();
     let mut removed: BTreeMap<&str, &PkgChange> = BTreeMap::new();
     for c in changes.iter().filter(|c| c.kind == "uninstall") {

@@ -2,8 +2,10 @@
 
 **Android phone investigation and app security analysis, in one self-contained binary.**
 
-APEX collects a phone's state over USB, without root and without installing
-anything, into a hashed case directory. It finds stalkerware and spyware,
+APEX collects a phone's state over USB, without root, into a hashed case
+directory, in under a minute with `--quick`. A small agent app is installed
+for a few seconds to read what ADB cannot, then removed, and every change it
+makes is recorded. It finds stalkerware and spyware,
 rebuilds install / uninstall and traffic history, lists the identifiers needed
 for legal requests, and, under a legal mandate, extracts communications, with
 deleted records recovered where the databases allow it. It writes a timeline,
@@ -41,6 +43,7 @@ tool makes a full file-system extraction under legal authority, and
 | [`device acquire`](Device-Acquire) | Forensic acquisition into a case directory, triage mode, mandate mode | yes |
 | [`device capture`](Device-Capture) | Capture the conversation on screen: text of every screen, screenshots, transcript (under mandate) | yes |
 | [`import`](Import) | Turn a lab's full file-system extraction into an APEX case | no |
+| [`db`](Db) | One SQLite database with everything in a case, for SQL queries | no |
 | [`analyze`](Analyze) | Findings on a case or any directory of packages; STIX2 and hash sets | no |
 | [`identifiers`](Identifiers) | IMEI, IMSI, ICCID, line, MACs, accounts, operators to request | no |
 | [`comms`](Comms) | Export communications collected under mandate (SQLite, CSV, JSON, KML), decrypt WhatsApp and Signal backups | no |
@@ -57,6 +60,7 @@ tool makes a full file-system extraction under legal authority, and
 ## Key concepts
 
 - **[Case directory](Case-Directory)**: what an acquisition or import writes, file by file.
+- **[APEX agent](Agent)**: the small app installed for the acquisition, what it reads, and per-maker prerequisites.
 - **[Evidence and integrity](Evidence-and-Integrity)**: audit log, manifest, `verify`, RFC 3161.
 - **[Legal scope](Legal-Scope)**: what is collected by default, what needs `--mandate`, what is never collected.
 - **[Communications and app data](Communications-and-App-Data)**: every source, live and from an extraction, and the keys they need.

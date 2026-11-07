@@ -203,7 +203,8 @@ pub fn entities(text: &str, chat: bool) -> Vec<(&'static str, String)> {
                     let low = raw.to_lowercase();
                     let domain = low.rsplit('@').next().unwrap_or("");
                     let tld = domain.rsplit('.').next().unwrap_or("");
-                    if domain.starts_with(|c: char| c.is_ascii_digit()) || FILE_EXT.contains(&tld) || low.starts_with("android.") || low.starts_with("vendor.") || domain.starts_with("com.android.") {
+                    // Google's public calendars (holidays, birthdays, weather) are calendar IDs, not people.
+                    if domain.starts_with(|c: char| c.is_ascii_digit()) || FILE_EXT.contains(&tld) || low.starts_with("android.") || low.starts_with("vendor.") || domain.starts_with("com.android.") || domain == "group.v.calendar.google.com" {
                         continue;
                     }
                     low

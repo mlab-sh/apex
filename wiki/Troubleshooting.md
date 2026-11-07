@@ -57,6 +57,21 @@ Raise `--settle-ms` (e.g. 2000) and run again.
 The 30 digits do not match this backup. Each time backups are turned on again,
 Signal makes a new passphrase: use the one shown when this backup was made.
 
+## `APEX agent: agent install refused` / installer opens on the phone
+
+Xiaomi / Redmi / POCO refuse ADB installs unless Developer options →
+**Install via USB** is on (Mi account); then accept the prompt on the phone.
+Without it, APEX puts the lite agent in `Download` and waits 3 minutes for you
+to install it from the phone; otherwise it goes on without the agent. If
+**Play Protect** blocks the installation, tap OK: APEX goes on without the
+agent.
+
+## `agent: the phone refused N permission(s)`
+
+Xiaomi ignores `pm grant` unless Developer options → **USB debugging
+(Security settings)** is on. The corresponding agent sections come back
+empty; the PV lists the refused permissions.
+
 ## `comms`: `No communications in this case`
 
 The case was acquired or imported without `--mandate`. Acquire or import it

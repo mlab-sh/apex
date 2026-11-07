@@ -2,12 +2,14 @@
 
 mod adb_checks;
 mod abx;
+mod agent;
 mod appdata;
 mod analyzers;
 mod artifacts;
 mod backup;
 mod capture;
 mod case;
+mod casedb;
 mod comms;
 mod cert_util;
 mod device;
@@ -82,6 +84,8 @@ enum Command {
     Seal(SealArgs),
     /// French procès-verbal de constatations for one or several exhibits (HTML)
     Pv(PvArgs),
+    /// One SQLite database with everything in a case (packages, findings, timeline, usage, comms, contacts, media, entities, captures)
+    Db(DbArgs),
 }
 
 #[derive(clap::Args)]
@@ -211,6 +215,24 @@ struct DiffArgs {
     #[arg(long = "json")]
     json_output: bool,
     /// JSON output file
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct DbArgs {
+    /// Case directory (acquisition or import)
+    case: PathBuf,
+    /// `device capture` directory to include (repeatable)
+    #[arg(long = "capture")]
+    captures: Vec<PathBuf>,
+    /// STIX2 indicator bundle to match (repeatable)
+    #[arg(long = "iocs")]
+    iocs: Vec<PathBuf>,
+    /// Alert hash set (repeatable): Project VIC / CAID VICS JSON, NSRL, or one hash per line
+    #[arg(long = "hashes")]
+    hashes: Vec<PathBuf>,
+    /// Output file (default: <case>.db, next to the case)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
 }
@@ -467,6 +489,12 @@ struct DeviceAcquireArgs {
     /// confirm on the phone with an EMPTY password
     #[arg(long)]
     backup: bool,
+    /// Do not install the APEX agent (app installed for the acquisition, then removed)
+    #[arg(long = "no-agent")]
+    no_agent: bool,
+    /// Shortest time plugged in: APKs hashed on the phone instead of pulled, no bugreport, logcat or usage-stats dump (the agent gives usage events)
+    #[arg(long)]
+    quick: bool,
     #[command(flatten)]
     conn: ConnArgs,
 }
@@ -574,6 +602,7 @@ fn main() -> ExitCode {
         Command::Search(args) => run_search(args),
         Command::Seal(args) => run_seal(args),
         Command::Pv(args) => run_pv(args),
+        Command::Db(args) => run_db(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -871,6 +900,27 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         acquire_save(&mut phone, &format!("settings list {ns}"), &device_dir.join(format!("settings_{ns}.txt")), &out, &mut collected);
     }
 
+    // ---- APEX agent: what the shell user cannot read (installed, read, removed). ----
+    let mut agent_changes: Vec<String> = Vec::new();
+    if !args.no_agent {
+        println!("\x1b[2m  APEX agent (install, read, uninstall)…\x1b[0m");
+        let scope = agent::Scope { mandate: args.mandate.is_some(), notifications: args.notification_content };
+        match agent::run(&mut phone, &out, &scope) {
+            Ok(o) => {
+                collected.push(json!({"file": "agent/agent.json", "sha256": scanner::compute_hash(&o.json).unwrap_or_default(), "bytes": o.bytes, "source_cmd": format!("content read --uri content://{}/dump/{}", agent::PKG, agent::sections(&scope, o.build).join(","))}));
+                if !o.errors.trim().is_empty() {
+                    eprintln!("\x1b[33m  agent: some sections failed:\n{}\x1b[0m", o.errors.trim_end());
+                }
+                println!("\x1b[2m  agent ({} build): {} KB\x1b[0m", if o.build == agent::Build::Full { "full" } else { "lite" }, o.bytes / 1024);
+                agent_changes = o.changes;
+            }
+            Err(e) => {
+                eprintln!("\x1b[33m[warn] APEX agent: {e}\x1b[0m");
+                agent_changes.push(format!("APEX agent: {e}"));
+            }
+        }
+    }
+
     if !args.triage {
     acquire_save(&mut phone, "dumpsys wifi", &device_dir.join("wifi.txt"), &out, &mut collected);
     acquire_save(&mut phone, "dumpsys bluetooth_manager", &device_dir.join("bluetooth.txt"), &out, &mut collected);
@@ -963,16 +1013,16 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         let (ok, total, failed) = media::pull_storage(&mut phone, &out);
         println!("\x1b[2m  {ok} file(s) pulled ({:.1} MB){}\x1b[0m", total as f64 / 1_048_576.0, if failed > 0 { format!(", {failed} failed") } else { String::new() });
     }
-    if !args.no_usagestats {
+    if !args.no_usagestats && !args.quick {
         println!("\x1b[2m  usage stats…\x1b[0m");
         acquire_save(&mut phone, "dumpsys usagestats", &device_dir.join("usagestats.txt"), &out, &mut collected);
     }
-    if !args.no_logcat {
+    if !args.no_logcat && !args.quick {
         println!("\x1b[2m  logcat…\x1b[0m");
         acquire_save(&mut phone, "logcat -d -v threadtime", &device_dir.join("logcat.txt"), &out, &mut collected);
     }
 
-    if !args.no_bugreport {
+    if !args.no_bugreport && !args.quick {
         println!("\x1b[2m  bugreport (1-5 min, keep the phone unlocked and plugged in)…\x1b[0m");
         // The pull is recorded (and hashed) in the audit trail → manifest artifacts.
         if let Err(e) = phone.bugreport(&device_dir.join("bugreport.zip")) {
@@ -1031,6 +1081,16 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         // Apps only installed in another user need that user's `pm path`.
         let user = profile_only.iter().find(|(n, _)| n == pkg).map(|(_, u)| *u);
         let paths = phone.apk_paths(pkg, user).unwrap_or_default();
+        if args.quick {
+            // Hashed on the phone: indicator matching by hash and certificate (agent) without the transfer.
+            if !paths.is_empty() {
+                acquire_save(&mut phone, &format!("sha256sum {}", paths.join(" ")), &appdir.join("apk_sha256.txt"), &out, &mut collected);
+                apk_count += paths.len();
+            }
+            acquire_save(&mut phone, &format!("dumpsys package {pkg}"), &appdir.join("dumpsys_package.txt"), &out, &mut collected);
+            println!("  \x1b[32m[{:>3}/{}]\x1b[0m {pkg}  \x1b[2m({} apk hashed on the phone)\x1b[0m", i + 1, packages.len(), paths.len());
+            continue;
+        }
         for remote in &paths {
             let base = remote.rsplit('/').next().unwrap_or("base.apk");
             let local = appdir.join(base);
@@ -1049,6 +1109,11 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     if let (Some(m), serde_json::Value::Object(o)) = (&args.mandate, &mut meta) {
         o.insert("mandate".into(), json!(m));
     }
+    if !agent_changes.is_empty() {
+        let mut all: Vec<serde_json::Value> = meta["phone_changes"].as_array().cloned().unwrap_or_default();
+        all.extend(agent_changes.iter().map(|c| json!(c)));
+        meta["phone_changes"] = json!(all);
+    }
     let kind = if args.triage { "device_triage" } else { "device_acquire" };
     match evidence::write_evidence(&out, &phone, kind, identifiers.clone(), &[], collected, meta) {
         Ok((mpath, sha)) => {
@@ -1056,9 +1121,10 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
                 println!("\n\x1b[32m✓ Triage done → {}\x1b[0m  \x1b[2m(volatile state, wipe check, identifiers; run a full acquire next)\x1b[0m", out.display());
             } else {
                 println!(
-                "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) → {}\x1b[0m",
+                "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) {} → {}\x1b[0m",
                 packages.len(),
                 apk_count,
+                if args.quick { "hashed on the phone (not pulled)" } else { "pulled" },
                 out.display()
             );
             }
@@ -1641,6 +1707,37 @@ fn run_diff(args: DiffArgs) -> ExitCode {
 }
 
 /// `<case>_<suffix>` next to the case directory.
+fn run_db(args: DbArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    let Some(mut iocs) = load_iocs(&args.iocs) else { return ExitCode::from(1) };
+    if let Err(e) = media::load_alert_hashsets(&mut iocs, &args.hashes) {
+        eprintln!("\x1b[31m{e}\x1b[0m");
+        return ExitCode::from(1);
+    }
+    let c = case::Case::load(&args.case);
+    let out = args.output.unwrap_or_else(|| {
+        let name = args.case.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "case".into());
+        args.case.with_file_name(format!("{name}.db"))
+    });
+    match casedb::build(&c, &iocs, &args.captures, &out) {
+        Ok(n) => {
+            println!("\x1b[32m✓ {}\x1b[0m", out.display());
+            for (t, k) in n.0 {
+                println!("  {t:<10} {k:>7}");
+            }
+            println!("\x1b[2m  sqlite3 {} \"SELECT time, kind, peer, text FROM comms ORDER BY time_ms\"\x1b[0m", out.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn sibling(case: &Path, suffix: &str) -> PathBuf {
     let name = case.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "case".into());
     case.with_file_name(format!("{name}_{suffix}"))

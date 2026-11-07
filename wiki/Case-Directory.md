@@ -33,7 +33,9 @@ case-42/
     location.txt, wifi.txt, wifi_networks.txt, bluetooth.txt
     sdcard_listing.txt     ls -laR of shared storage (metadata only)
     bugreport.zip          full dumpstate: every dumpsys, tombstones, ANRs, battery history
+  agent/agent.json         what the APEX agent read (packages + certificates, usage, SIMs, media, contacts…)
   apps/<package>/          base.apk + every split APK, dumpsys_package.txt
+                           (--quick: apk_sha256.txt, hashes computed on the phone, instead of the APKs)
   comms/                   only with --mandate
     sms.txt, mms.txt, mms_part.txt, mms_addr.txt, calls.txt, contacts.txt, calendar.txt   (live)
     mms_parts/             MMS attachments

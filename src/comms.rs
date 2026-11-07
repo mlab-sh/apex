@@ -132,6 +132,11 @@ fn call_dir(t: i64) -> &'static str {
     }
 }
 
+/// Google's public holiday calendars, subscribed by default: not the phone owner's events.
+fn public_calendar(organizer: &str) -> bool {
+    organizer.contains("#holiday@group.v.calendar.google.com")
+}
+
 fn calendar_row(start: i64, title: &str, place: &str, desc: &str, organizer: &str, deleted: bool, source: &str) -> Comm {
     Comm {
         time_ms: start,
@@ -188,7 +193,7 @@ fn live(dir: &Path) -> Vec<Comm> {
             recovered: false,
         });
     }
-    for r in parse_content_query(&rd("calendar.txt"), CAL_COLS) {
+    for r in parse_content_query(&rd("calendar.txt"), CAL_COLS).into_iter().filter(|r| !public_calendar(&s(r, "organizer"))) {
         out.push(calendar_row(n(&r, "dtstart"), &s(&r, "title"), &s(&r, "eventLocation"), &s(&r, "description"), &s(&r, "organizer"), n(&r, "deleted") == 1, "content://com.android.calendar"));
     }
     for r in parse_content_query(&rd("contacts.txt"), CONTACT_COLS) {
@@ -591,7 +596,7 @@ pub fn load_with(case: &Case, keys: &crate::appdata::Keys) -> (Vec<Comm>, Vec<St
         out.extend(chrome(&d));
     }
     if let Some(d) = open(&db, "calendar.db") {
-        out.extend(rows(&d, "SELECT dtstart, title, eventLocation, description, organizer, deleted FROM Events").iter().map(|m| {
+        out.extend(rows(&d, "SELECT dtstart, title, eventLocation, description, organizer, deleted FROM Events").iter().filter(|m| !public_calendar(&vs(m, "organizer"))).map(|m| {
             calendar_row(vi(m, "dtstart"), &vs(m, "title"), &vs(m, "eventLocation"), &vs(m, "description"), &vs(m, "organizer"), vi(m, "deleted") == 1, "calendar.db")
         }));
     }

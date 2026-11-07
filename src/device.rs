@@ -334,6 +334,24 @@ impl Phone {
         Ok(remote)
     }
 
+    /// Push bytes to a remote path (the APEX agent APK), recorded with their hash.
+    pub fn push(&mut self, data: &[u8], remote: &str) -> Result<(), String> {
+        let started = Instant::now();
+        let action = format!("push: {} bytes -> {remote}", data.len());
+        let mut r = std::io::Cursor::new(data);
+        match self.dev.push(&mut r, &remote) {
+            Ok(_) => {
+                self.record(action, started, true, Some(data), None);
+                Ok(())
+            }
+            Err(e) => {
+                let err = format!("push '{remote}' failed: {e}");
+                self.record(action, started, false, None, Some(err.clone()));
+                Err(err)
+            }
+        }
+    }
+
     /// Pull a remote file into a local path.
     pub fn pull(&mut self, remote: &str, local: &Path) -> Result<(), String> {
         let started = Instant::now();

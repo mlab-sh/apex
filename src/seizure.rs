@@ -271,10 +271,25 @@ pub fn identifiers(case: &crate::case::Case) -> Value {
         net.insert("bluetooth_name".into(), json!(m));
     }
 
-    let accounts: Vec<Value> = parse_accounts(&read("accounts.txt"))
-        .into_iter()
-        .map(|(t, n)| json!({"service": service(&t), "type": t, "name": n}))
-        .collect();
+    // `dumpsys account` masks names on recent Android ("abc***@gmail.com"); the
+    // agent reads them in clear: use its name when it fits the mask.
+    let agent: Vec<(String, String)> = crate::agent::load(&case.root)
+        .map(|v| v["sections"]["accounts"].as_array().into_iter().flatten().map(|a| (a["type"].as_str().unwrap_or("").to_string(), a["name"].as_str().unwrap_or("").to_string())).collect())
+        .unwrap_or_default();
+    let mut accts = parse_accounts(&read("accounts.txt"));
+    for (t, n) in accts.iter_mut() {
+        if let Some((pre, post)) = n.split_once("***") {
+            if let Some((_, full)) = agent.iter().find(|(at, an)| at == t && an.starts_with(pre) && an.ends_with(post) && an.len() >= pre.len() + post.len()) {
+                *n = full.clone();
+            }
+        }
+    }
+    for (t, n) in &agent {
+        if !accts.iter().any(|(at, an)| at == t && an == n) {
+            accts.push((t.clone(), n.clone()));
+        }
+    }
+    let accounts: Vec<Value> = accts.into_iter().map(|(t, n)| json!({"service": service(&t), "type": t, "name": n})).collect();
 
     let apps: Vec<Value> = crate::appdata::apps_of_interest(case.third_party.iter()).into_iter().map(|(p, c, o)| json!({"package": p, "category": c, "operator": o})).collect();
 

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- APEX agent: installed over USB for an acquisition, read through its
+     content provider, uninstalled at the end. No UI, no network, no service
+     running on its own. Every permission is granted by APEX with `pm grant`
+     according to the legal scope of the acquisition.
+     Two builds (scripts/build-agent.sh): full, and lite without the FULL-ONLY
+     blocks (SMS, notification access), for phones that block apps asking for them. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="sh.mlab.apex.agent"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <!-- Device state (always) -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Under mandate only (granted by APEX only with \-\-mandate) -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- FULL-ONLY -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- /FULL-ONLY -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+
+    <application
+        android:label="APEX agent"
+        android:allowBackup="false"
+        android:hasCode="true">
+
+        <!-- Read by the shell: content read \-\-uri content://sh.mlab.apex.agent/dump/<sections> -->
+        <provider
+            android:name=".DumpProvider"
+            android:authorities="sh.mlab.apex.agent"
+            android:exported="true" />
+
+        <!-- FULL-ONLY -->
+        <!-- Enabled by APEX (cmd notification allow_listener) only with \-\-notification-content -->
+        <service
+            android:name=".Listener"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+        <!-- /FULL-ONLY -->
+    </application>
+</manifest>

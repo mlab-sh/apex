@@ -25,3 +25,5 @@ apex_dump
 # Local release artifacts
 /dist
 docs/
+agent/apex-agent.keystore
+agent/build/

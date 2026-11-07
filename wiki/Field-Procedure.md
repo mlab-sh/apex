@@ -53,7 +53,24 @@ If APEX prints a **red remote-wipe alert** (find-my-device signed in, MDM,
 device admin) and says the phone is online: put it in **airplane mode** now
 (and Wi-Fi off), note the time. The acquisitions after this show the change.
 
-## 4. Full acquisition (≈ 5–10 min, more with `--storage`)
+## 4. Acquisition
+
+**Shortest time plugged in (≈ 1 min):**
+
+```sh
+apex device acquire --quick --mandate "JIRS-2026-17" \
+  --case-id "2026-0142" --examiner "Brigadier X" --seal "SCELLÉ N°1" \
+  -o ./2026-0142_s1
+```
+
+APKs are hashed on the phone instead of pulled, no bugreport; the
+[APEX agent](Agent) is installed for ≈ 8 s (confirm the install prompt on
+Xiaomi) and gives packages with certificates, usage and unlock history,
+contacts, SIMs and media. Unplug, and do the rest at the office.
+
+**Full acquisition (≈ 5–10 min, more with `--storage`)**, when the phone can
+stay plugged in: also the APKs themselves (static analysis) and the bugreport
+(battery and install history).
 
 Without a mandate, APEX collects the phone's state, apps and history, but no
 communication content (see [Legal scope](Legal-Scope)):
@@ -132,6 +149,7 @@ Copy the case directory to its storage medium; `verify` works wherever it is
 ## 6. Analysis (back at the office, no phone needed)
 
 ```sh
+apex db ./2026-0142_s1                           # everything in ./2026-0142_s1.db, for SQL
 apex analyze ./2026-0142_s1 --iocs stalkerware.stix2 --detail
 apex identifiers ./2026-0142_s1                  # legal requests: IMEI, IMSI, line, accounts, operators
 apex comms ./2026-0142_s1                        # under mandate: comms.csv / comms.json

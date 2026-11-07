@@ -40,6 +40,15 @@ Notifications are captured **redacted** (which app, when; no text).
 - Any network call during acquisition or analysis. Only [`seal`](Seal) goes
   online, and sends a hash.
 
+## The APEX agent
+
+The [agent](Agent) gets only the permissions of the acquisition's scope:
+device state without a mandate; contacts, call log, calendar, SMS and photo
+positions only with `--mandate`; notifications only with
+`--notification-content`. It has no network permission and is removed at the
+end. Its install, the permissions actually granted and its removal are
+recorded automatically.
+
 ## Changes to the phone
 
 Enabling developer options and USB debugging, airplane mode, turning on an

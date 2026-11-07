@@ -249,6 +249,17 @@ impl IocSet {
                 }
                 continue;
             }
+            // `device acquire --quick`: APKs hashed on the phone, not pulled ("<sha256>  <path>").
+            if want_hashes && rel.ends_with("apk_sha256.txt") {
+                for l in std::fs::read_to_string(path).unwrap_or_default().lines() {
+                    if let Some((h, f)) = l.split_once(char::is_whitespace) {
+                        if let Some(m) = self.get(Kind::Sha256, &h.to_ascii_lowercase()) {
+                            push_hit(&mut hits, Kind::Sha256, h, m, &format!("{rel} ({})", f.trim()));
+                        }
+                    }
+                }
+                continue;
+            }
             match ext.as_str() {
                 "apk" => {
                     if want_hashes {

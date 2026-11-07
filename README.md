@@ -72,6 +72,24 @@ apex verify ./case-42                                    # 5. integrity check
 [`generated/stalkerware.stix2`](https://github.com/AssoEchap/stalkerware-indicators/tree/master/generated);
 any STIX 2.x indicator bundle works (MVT / Amnesty, your own).
 
+**Shortest time plugged in.** `apex device acquire --quick` takes about a
+minute: APKs are hashed on the phone instead of pulled, no bugreport, and the
+**APEX agent** (a 17 KB app embedded in the binary, no network permission) is
+installed for a few seconds to read what ADB cannot: packages with signing
+certificates and install source, usage and unlock history, SIMs and line
+numbers, media with the app that wrote each file, and under `--mandate`
+contacts, call log, calendar and photo positions. It is then uninstalled;
+its install, the permissions the phone actually granted and its removal are
+recorded in the manifest and the procès-verbal. `--no-agent` skips it. Xiaomi
+needs *Install via USB* and *USB debugging (Security settings)* for it
+([wiki](https://github.com/mlab-sh/apex/wiki/Agent)).
+
+**One database per case.** `apex db ./case-42` writes `case-42.db` (SQLite):
+identifiers, accounts, SIMs, packages and permissions, findings, timeline,
+usage events, communications, contacts, media, entities and screen captures,
+for SQL queries by an examiner or an agent
+([tables](https://github.com/mlab-sh/apex/wiki/Db)).
+
 ## Seized phones
 
 **Remote wipe.** `device acquire`, `posture` and `scan` check first, before
@@ -240,7 +258,8 @@ into the timeline with their location.
    answered after a few seconds, APEX says it is waiting for it.
 
 APEX talks to the phone directly over USB (`adb_client`); no `adb` server is
-needed. Everything runs as the non-root `shell` user.
+needed. Everything runs as the non-root `shell` user, plus the APEX agent
+app for a few seconds during `device acquire` (see above).
 
 Several phones plugged in: `apex device listen` prints their serials; pick one
 with `--serial <SERIAL>`. Over the network: after `adb tcpip 5555` on the
