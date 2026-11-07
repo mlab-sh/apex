@@ -464,6 +464,7 @@ impl Case {
         out.extend(crate::seizure::wipe_finding(self));
         out.extend(self.comms_media_findings());
         out.extend(crate::agent::cert_findings(&self.root, iocs));
+        out.extend(crate::cyber::findings(self));
         let mut hits = iocs.scan_dir(&self.root, &self.package_names());
         hits.extend(net_hits);
         out.extend(ioc_findings(&hits));

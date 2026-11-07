@@ -15,6 +15,7 @@ case-42/
     proc_exe.txt           real executable of each shell-user process (/proc/PID/exe)
     net_sockets.txt        /proc/net/{tcp,tcp6,udp,udp6}
     local_tmp.txt          ls -laR /data/local/tmp
+    su_check.txt           ls -l of the usual su paths (root check; nothing is run)
     screen.png             screenshot at acquisition time
     iphonesubinfo.txt      IMEI / IMSI / ICCID / line number (read-only getters)
     getprop.txt, identifiers.json

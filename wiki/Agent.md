@@ -17,6 +17,7 @@ On by default; `--no-agent` skips it.
 | bluetooth | paired devices | — |
 | usage | usage events the system keeps (often weeks): app in front, **screen on / off, unlock**, foreground services, boot / shutdown | — |
 | media | every MediaStore row: path, size, dates, MIME type, **the app that wrote the file** | — |
+| ca_certs | certificate authorities **added by the user** (interception of encrypted traffic) | — |
 | contacts | every column of every contact data row (names, numbers, e-mails, accounts, starred, last update) | `--mandate` |
 | calllog, calendar | every column (more than the shell gets) | `--mandate` |
 | media GPS | photo EXIF position, date, make, model; video position | `--mandate` |

@@ -91,7 +91,7 @@ fn permissions(sdk: u32, scope: &Scope, build: Build) -> Vec<&'static str> {
 
 /// Sections read for this scope.
 pub fn sections(scope: &Scope, build: Build) -> Vec<&'static str> {
-    let mut s = vec!["packages", "accounts", "telephony", "bluetooth", "usage", "media"];
+    let mut s = vec!["packages", "accounts", "telephony", "bluetooth", "usage", "media", "ca_certs"];
     if scope.mandate {
         s.extend(["contacts", "calllog", "calendar", "media_gps"]);
         if build == Build::Full {

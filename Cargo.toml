@@ -43,6 +43,8 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 p384 = { version = "0.13", features = ["ecdsa"] }
 aes-gcm = "0.10"
 hmac = "0.12"
+toml = "0.8"
+bip39 = { version = "2", features = ["french", "spanish", "italian"] }
 
 [profile.release]
 opt-level = 3

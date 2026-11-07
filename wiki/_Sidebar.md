@@ -19,6 +19,7 @@
 
 **Analysis**
 - [db](Db)
+- [link](Link)
 - [analyze](Analyze)
 - [identifiers](Identifiers)
 - [comms](Comms)
@@ -44,5 +45,6 @@
 - [Communications and app data](Communications-and-App-Data)
 - [Deleted records](Deleted-Records)
 - [Findings](Findings)
+- [Rules file](Rules-File)
 - [Indicators and hash sets](Indicators-and-Hash-Sets)
 - [Accuracy and limits](Limits)

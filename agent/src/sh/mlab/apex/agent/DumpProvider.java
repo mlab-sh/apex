@@ -76,7 +76,7 @@ public class DumpProvider extends ContentProvider {
         try (Writer f = new OutputStreamWriter(new FileOutputStream(out), "UTF-8")) {
             f.write("{\"agent_version\":" + VERSION + ",\"time_ms\":" + System.currentTimeMillis() + ",\"sdk\":" + Build.VERSION.SDK_INT + ",\"sections\":{");
             boolean first = true;
-            for (String s : new String[]{"packages", "accounts", "telephony", "bluetooth", "usage", "media", "contacts", "calllog", "sms", "calendar", "notifications"}) {
+            for (String s : new String[]{"packages", "accounts", "telephony", "bluetooth", "usage", "media", "ca_certs", "contacts", "calllog", "sms", "calendar", "notifications"}) {
                 if (!want.isEmpty() && !want.contains(s)) continue;
                 StringWriter sw = new StringWriter();
                 try (JsonWriter w = new JsonWriter(sw)) {
@@ -107,6 +107,7 @@ public class DumpProvider extends ContentProvider {
             case "bluetooth": bluetooth(w); break;
             case "usage": usage(ctx, w); break;
             case "media": media(ctx, gps, w); break;
+            case "ca_certs": caCerts(w); break;
             case "contacts": cursor(ctx, ContactsContract.Data.CONTENT_URI, w); break;
             case "calllog": cursor(ctx, CallLog.Calls.CONTENT_URI, w); break;
             case "sms": cursor(ctx, Uri.parse("content://sms"), w); break;
@@ -140,6 +141,34 @@ public class DumpProvider extends ContentProvider {
         StringBuilder s = new StringBuilder();
         for (byte x : b) s.append(String.format("%02x", x));
         return s.toString();
+    }
+
+    /** Certificate authorities trusted by the phone; "user:" aliases were added by the user. */
+    private static void caCerts(JsonWriter w) throws Exception {
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("AndroidCAStore");
+        ks.load(null, null);
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT);
+        w.beginArray();
+        java.util.Enumeration<String> aliases = ks.aliases();
+        while (aliases.hasMoreElements()) {
+            String alias = aliases.nextElement();
+            boolean user = alias.startsWith("user:");
+            if (!user) continue; // system ones are the same on every phone of a version
+            java.security.cert.Certificate c = ks.getCertificate(alias);
+            if (!(c instanceof java.security.cert.X509Certificate)) continue;
+            java.security.cert.X509Certificate x = (java.security.cert.X509Certificate) c;
+            w.beginObject();
+            w.name("alias").value(alias);
+            w.name("user").value(true);
+            w.name("subject").value(x.getSubjectX500Principal().getName());
+            w.name("issuer").value(x.getIssuerX500Principal().getName());
+            w.name("not_before").value(iso.format(x.getNotBefore()));
+            w.name("not_after").value(iso.format(x.getNotAfter()));
+            w.name("sha256").value(hex(sha256.digest(x.getEncoded())));
+            w.endObject();
+        }
+        w.endArray();
     }
 
     @SuppressWarnings("deprecation")

@@ -109,7 +109,7 @@ fn iban_ok(s: &str) -> bool {
     m == 1
 }
 
-fn base58check_ok(s: &str) -> bool {
+pub(crate) fn base58check_ok(s: &str) -> bool {
     const A: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let mut n: Vec<u8> = vec![0];
     for c in s.bytes() {
@@ -203,6 +203,11 @@ pub fn entities(text: &str, chat: bool) -> Vec<(&'static str, String)> {
                     let low = raw.to_lowercase();
                     let domain = low.rsplit('@').next().unwrap_or("");
                     let tld = domain.rsplit('.').next().unwrap_or("");
+                    // Machine IDs look like addresses: calendar event UIDs (20251101_8ql41d…@google.com) and the like.
+                    let local = low.split('@').next().unwrap_or("");
+                    if local.len() >= 20 && local.chars().filter(char::is_ascii_digit).count() >= 6 && !local.contains('.') {
+                        continue;
+                    }
                     // Google's public calendars (holidays, birthdays, weather) are calendar IDs, not people.
                     if domain.starts_with(|c: char| c.is_ascii_digit()) || FILE_EXT.contains(&tld) || low.starts_with("android.") || low.starts_with("vendor.") || domain.starts_with("com.android.") || domain == "group.v.calendar.google.com" {
                         continue;

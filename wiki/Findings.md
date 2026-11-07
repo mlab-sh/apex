@@ -63,6 +63,28 @@ evidence (`--detail`). They are **indicators**: see [Accuracy and limits](Limits
 | `HASH_SET_MATCH` | a file matches an alert hash set (`--hashes`) |
 | `CASE_APPS_OF_INTEREST` | installed apps whose operator holds data worth a legal request (ride-hailing, delivery, payment, wallets, encrypted messaging, social) |
 
+## Cyber
+
+Computed locally from the case. The text-based ones use short built-in lists
+that your [rules file](Rules-File) extends.
+
+| ID | Meaning | Needs |
+|---|---|---|
+| `CASE_USER_CA_CERT` | a certificate authority added by the user: whoever holds its key can read the phone's encrypted traffic | [agent](Agent) |
+| `CASE_BANKING_TROJAN_PROFILE` | accessibility plus two of: overlay, SMS reading, notification access, installing apps | |
+| `CASE_ROOT_OR_INSTRUMENTATION` | Magisk / KernelSU / LSPosed…, Frida server or port, `su` binary, unlocked bootloader, permissive SELinux, test-keys build | rules: `[root]` |
+| `CASE_SIGNATURE_MATCH` | strings in the code of an app not from a store, hidden or privileged (Telegram bot, Discord webhook, tunnels, SMS forwarding…) | APKs pulled; rules: `[[signatures.rule]]` |
+| `CASE_SYSTEM_CRASHES` | native crashes of media, messaging or system processes (exploitation attempts crash them; so do bugs) | bugreport; rules: `[spyware]` |
+| `CASE_SPYWARE_INDICATOR` | process, file or domain from your rules file found | rules: `[spyware]` |
+| `CASE_PERSISTENCE` | an app not from a store, hidden or privileged that keeps itself running (boot, admin, accessibility, jobs, alarms…) | |
+| `CASE_INFECTION_CHAIN` | message with a link or APK download → install (and by which app) → first permission uses, dated, for an app not from a store | [agent](Agent) for the install time and source |
+| `CASE_APP_ENDPOINTS` | URLs, IP addresses with a port, Telegram bot tokens, Firebase databases hard-coded in a suspicious app | APKs pulled; rules: `[endpoints]` |
+| `CASE_PERIODIC_UPLOAD` | an app sends data in most periods, in the background: scheduled exfiltration (or a backup app) | network statistics; rules: `[uploads]` |
+| `CASE_ANTI_FORENSICS` | reset less than 30 days before, uninstall bursts, deleted messages recovered, automatic time off, data-wiping apps | rules: `[anti_forensics]` |
+| `CASE_VAULT_APP` | an app that hides content behind a code or a decoy, with its folders | rules: `[vault]` |
+| `CASE_CRYPTO_SEED` | a BIP39 recovery phrase (checksum verified) or a WIF private key in messages, notes, clipboard, files or app data | rules: `[seeds]` |
+| `CASE_SMISHING` | a message naming a brand but linking to another domain, a URL shortener, lure words | rules: `[smishing]` |
+
 "Sideloaded" means installed through a package-installer screen, by another
 user app, or over adb. Preloads installed by system or OEM components are
 not.

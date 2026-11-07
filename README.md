@@ -90,6 +90,16 @@ usage events, communications, contacts, media, entities and screen captures,
 for SQL queries by an examiner or an agent
 ([tables](https://github.com/mlab-sh/apex/wiki/Db)).
 
+**Cyber findings, offline.** Infection chain (phishing link or APK download,
+install and by which app, first permission uses, dated), phishing messages,
+banking-trojan profile, root and instrumentation (Magisk, Frida…),
+user-installed certificate authorities, signatures in app code, hard-coded
+servers (URLs, IPs, Telegram bots, Firebase), scheduled uploads, persistence,
+anti-forensics, vault apps, crypto recovery phrases (BIP39, checksum verified),
+and `apex link` across exhibits. The text-based checks use short built-in
+lists that a TOML rules file extends with the service's own
+([format and example](https://github.com/mlab-sh/apex/wiki/Rules-File)).
+
 ## Seized phones
 
 **Remote wipe.** `device acquire`, `posture` and `scan` check first, before

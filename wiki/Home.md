@@ -44,6 +44,7 @@ tool makes a full file-system extraction under legal authority, and
 | [`device capture`](Device-Capture) | Capture the conversation on screen: text of every screen, screenshots, transcript (under mandate) | yes |
 | [`import`](Import) | Turn a lab's full file-system extraction into an APEX case | no |
 | [`db`](Db) | One SQLite database with everything in a case, for SQL queries | no |
+| [`link`](Link) | What several exhibits have in common: numbers, accounts, wallets, Wi-Fi, apps | no |
 | [`analyze`](Analyze) | Findings on a case or any directory of packages; STIX2 and hash sets | no |
 | [`identifiers`](Identifiers) | IMEI, IMSI, ICCID, line, MACs, accounts, operators to request | no |
 | [`comms`](Comms) | Export communications collected under mandate (SQLite, CSV, JSON, KML), decrypt WhatsApp and Signal backups | no |
@@ -65,7 +66,8 @@ tool makes a full file-system extraction under legal authority, and
 - **[Legal scope](Legal-Scope)**: what is collected by default, what needs `--mandate`, what is never collected.
 - **[Communications and app data](Communications-and-App-Data)**: every source, live and from an extraction, and the keys they need.
 - **[Deleted records](Deleted-Records)**: how SQLite write-ahead logs and free pages are carved.
-- **[Findings](Findings)**: every finding ID and what it means.
+- **[Findings](Findings)**: every finding ID and what it means, cyber findings included.
+- **[Rules file](Rules-File)**: extend the built-in lists (phishing brands, vault apps, signatures…) with your own.
 - **[Indicators and hash sets](Indicators-and-Hash-Sets)**: STIX2, Project VIC / CAID, NSRL.
 - **[Accuracy and limits](Limits)**: what a finding proves and what it does not.
 

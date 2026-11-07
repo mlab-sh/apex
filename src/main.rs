@@ -11,6 +11,7 @@ mod capture;
 mod case;
 mod casedb;
 mod comms;
+mod cyber;
 mod cert_util;
 mod device;
 mod diff;
@@ -19,11 +20,13 @@ mod evidence;
 mod history;
 mod import;
 mod ioc;
+mod link;
 mod media;
 mod models;
 mod output;
 mod pv;
 mod report;
+mod rules;
 mod scanner;
 mod sqlite_carve;
 mod search;
@@ -84,6 +87,8 @@ enum Command {
     Seal(SealArgs),
     /// French procès-verbal de constatations for one or several exhibits (HTML)
     Pv(PvArgs),
+    /// What several exhibits have in common: numbers, e-mails, accounts, wallets, IBANs, Wi-Fi networks, Bluetooth devices, sideloaded apps
+    Link(LinkArgs),
     /// One SQLite database with everything in a case (packages, findings, timeline, usage, comms, contacts, media, entities, captures)
     Db(DbArgs),
 }
@@ -215,6 +220,16 @@ struct DiffArgs {
     #[arg(long = "json")]
     json_output: bool,
     /// JSON output file
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct LinkArgs {
+    /// Case directories, one per exhibit (at least two)
+    #[arg(required = true, num_args = 2..)]
+    cases: Vec<PathBuf>,
+    /// Also write the links as CSV
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
 }
@@ -603,6 +618,7 @@ fn main() -> ExitCode {
         Command::Seal(args) => run_seal(args),
         Command::Pv(args) => run_pv(args),
         Command::Db(args) => run_db(args),
+        Command::Link(args) => run_link(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -858,6 +874,8 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     acquire_save(&mut phone, "ls -l /proc/[0-9]*/exe 2>/dev/null", &device_dir.join("proc_exe.txt"), &out, &mut collected);
     acquire_save(&mut phone, "cat /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6", &device_dir.join("net_sockets.txt"), &out, &mut collected);
     acquire_save(&mut phone, "ls -laR /data/local/tmp", &device_dir.join("local_tmp.txt"), &out, &mut collected);
+    // Root: an `su` binary in the usual places (listing only, nothing is run).
+    acquire_save(&mut phone, "ls -l /system/bin/su /system/xbin/su /sbin/su /su/bin/su /debug_ramdisk/su 2>&1", &device_dir.join("su_check.txt"), &out, &mut collected);
     if !args.no_screenshot {
         // Written to the shell's scratch dir, pulled (hashed in the audit log), then removed.
         let remote = "/data/local/tmp/apex_screen.png";
@@ -1737,6 +1755,38 @@ fn run_diff(args: DiffArgs) -> ExitCode {
 }
 
 /// `<case>_<suffix>` next to the case directory.
+fn run_link(args: LinkArgs) -> ExitCode {
+    for c in &args.cases {
+        if !case::Case::is_case(c) {
+            eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", c.display());
+            return ExitCode::from(1);
+        }
+    }
+    let links = link::link(&args.cases);
+    let n: usize = links.values().map(|v| v.len()).sum();
+    println!("\x1b[1mShared between exhibits\x1b[0m  \x1b[2m({} case(s), {n} link(s))\x1b[0m", args.cases.len());
+    let mut csv = String::from("kind,value,cases\n");
+    for (kind, vals) in &links {
+        println!("\x1b[1m{kind}\x1b[0m");
+        for (shown, cases) in vals.values() {
+            let list = cases.iter().cloned().collect::<Vec<_>>().join(" · ");
+            println!("  {shown:<44} {list}");
+            csv.push_str(&format!("{kind},\"{}\",\"{}\"\n", shown.replace('"', "\"\""), list.replace('"', "\"\"")));
+        }
+    }
+    if n == 0 {
+        println!("  nothing in common");
+    }
+    if let Some(o) = &args.output {
+        if let Err(e) = std::fs::write(o, csv) {
+            eprintln!("\x1b[31m{}: {e}\x1b[0m", o.display());
+            return ExitCode::from(1);
+        }
+        println!("\x1b[32m✓ {}\x1b[0m", o.display());
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_db(args: DbArgs) -> ExitCode {
     if !case::Case::is_case(&args.case) {
         eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
