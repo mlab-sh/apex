@@ -24,7 +24,10 @@ On by default; `--no-agent` skips it.
 | notifications | active notifications with the **messages** messaging apps keep in them | `--mandate --notification-content`, full build |
 
 The output is `agent/agent.json` in the case, hashed in the manifest. It
-feeds [`apex db`](Db) and the findings: with `--quick`, signing certificates
+feeds the [timeline](Timeline) (unlocks, app in front), the [report](Report)
+and the [PV](PV) (phone use), [`identifiers`](Identifiers) (SIMs, full
+account names), [`comms`](Comms) (contacts, names on numbers),
+[`apex db`](Db) and the findings: with `--quick`, signing certificates
 read by the agent are matched against stalkerware certificates and STIX2
 `app:cert.*` indicators, so APKs need not be pulled.
 

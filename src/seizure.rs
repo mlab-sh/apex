@@ -252,6 +252,15 @@ pub fn identifiers(case: &crate::case::Case) -> Value {
     // Dual-SIM props are comma-separated per slot: ",20815".
     let split = |k: &str| prop(&gp, k).map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect::<Vec<_>>()).unwrap_or_default();
     let mut tel = classify_telephony(&parcel_strings(&read("iphonesubinfo.txt")), &split("gsm.sim.operator.numeric"));
+    // The agent reads each SIM's line number and ICCID when the getters above do not give them.
+    for (k, v) in crate::agent::sim_identifiers(&case.root) {
+        let e = tel.entry(k).or_insert_with(|| json!([]));
+        if let Some(a) = e.as_array_mut() {
+            if !a.iter().any(|x| x.as_str() == Some(&v)) {
+                a.push(json!(v));
+            }
+        }
+    }
     for (k, p) in [("sim_operator", "gsm.sim.operator.alpha"), ("sim_country", "gsm.sim.operator.iso-country"), ("network_operator", "gsm.operator.alpha")] {
         let v = split(p);
         if !v.is_empty() {

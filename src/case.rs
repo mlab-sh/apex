@@ -578,6 +578,7 @@ impl Case {
         ev.extend(crate::history::events(self));
         ev.extend(crate::comms::events(self));
         ev.extend(crate::media::events(self));
+        ev.extend(crate::agent::events(self));
         ev.sort_by(|a, b| a.local.cmp(&b.local).then(a.message.cmp(&b.message)));
         // appops lists one access under several states/attribution tags.
         ev.dedup_by(|a, b| a.local == b.local && a.desc == b.desc && a.package == b.package && a.message == b.message);

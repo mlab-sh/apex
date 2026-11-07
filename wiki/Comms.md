@@ -69,6 +69,10 @@ sqlite3 case-42_comms/comms.db "SELECT time, kind, peer, text FROM comms WHERE t
 sqlite3 case-42_comms/comms.db "SELECT peer, count(*) FROM comms GROUP BY peer ORDER BY 2 DESC LIMIT 10"
 ```
 
+Contacts come from the shell, the extraction, or the [APEX agent](Agent) when
+the shell is refused. A bare number in any record gets the contact's name
+added (`+33612345678 (Dédé)`), matched on the last nine digits.
+
 `time` is the phone's local time with its UTC offset. `recovered = true`
 marks a record deleted from the database and carved back, or a WhatsApp
 backup message no longer in the live database. See [Deleted records](Deleted-Records).

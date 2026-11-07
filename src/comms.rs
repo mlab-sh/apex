@@ -600,8 +600,51 @@ pub fn load_with(case: &Case, keys: &crate::appdata::Keys) -> (Vec<Comm>, Vec<St
             calendar_row(vi(m, "dtstart"), &vs(m, "title"), &vs(m, "eventLocation"), &vs(m, "description"), &vs(m, "organizer"), vi(m, "deleted") == 1, "calendar.db")
         }));
     }
+    // Contacts the shell could not read, from the APEX agent (under mandate).
+    if !out.iter().any(|c| c.kind == "contact") {
+        if let Some(v) = crate::agent::load(&case.root) {
+            for x in v["sections"]["contacts"].as_array().into_iter().flatten() {
+                let mt = x["mimetype"].as_str().unwrap_or("");
+                let kind = if mt.ends_with("phone_v2") { "phone" } else if mt.ends_with("email_v2") { "email" } else { continue };
+                out.push(Comm {
+                    time_ms: 0,
+                    kind: "contact",
+                    direction: String::new(),
+                    peer: x["data1"].as_str().unwrap_or("").to_string(),
+                    text: x["display_name"].as_str().unwrap_or("").to_string(),
+                    extra: kind.into(),
+                    source: "contacts (APEX agent)".into(),
+                    recovered: false,
+                });
+            }
+        }
+    }
+    name_peers(&mut out);
     out.sort_by(|a, b| a.time_ms.cmp(&b.time_ms).then(a.kind.cmp(b.kind)));
     (out, notes)
+}
+
+/// Last 9 digits: matches +33 6 12 34 56 78, 0612345678 and 33612345678@s.whatsapp.net.
+fn number_key(s: &str) -> Option<String> {
+    let d: String = s.split('@').next().unwrap_or(s).chars().filter(char::is_ascii_digit).collect();
+    (d.len() >= 9).then(|| d[d.len() - 9..].to_string())
+}
+
+/// Add the contact name to bare numbers ("+33612345678" → "+33612345678 (Dédé)").
+fn name_peers(items: &mut [Comm]) {
+    let names: BTreeMap<String, String> = items
+        .iter()
+        .filter(|c| c.kind == "contact" && !c.text.is_empty())
+        .filter_map(|c| Some((number_key(&c.peer)?, c.text.clone())))
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    for c in items.iter_mut().filter(|c| c.kind != "contact" && !c.peer.contains('(')) {
+        if let Some(n) = number_key(&c.peer).and_then(|k| names.get(&k)) {
+            c.peer = format!("{} ({n})", c.peer);
+        }
+    }
 }
 
 pub fn events(case: &Case) -> Vec<Event> {
@@ -716,6 +759,16 @@ mod tests {
         assert_eq!(r[0]["body"], "Salut, ça va, body=ok?\nseconde ligne");
         assert_eq!(r[0]["address"], "+33600000000");
         assert!(!r[1].contains_key("address"));
+    }
+
+    #[test]
+    fn peers_get_contact_names() {
+        let c = |kind: &'static str, peer: &str, text: &str| Comm { time_ms: 0, kind, direction: String::new(), peer: peer.into(), text: text.into(), extra: String::new(), source: String::new(), recovered: false };
+        let mut v = vec![c("contact", "06 12 34 56 78", "Dédé"), c("sms", "+33612345678", "salut"), c("call", "+33699999999", ""), c("whatsapp", "33612345678@s.whatsapp.net (Dédé W)", "")];
+        name_peers(&mut v);
+        assert_eq!(v[1].peer, "+33612345678 (Dédé)");
+        assert_eq!(v[2].peer, "+33699999999");
+        assert_eq!(v[3].peer, "33612345678@s.whatsapp.net (Dédé W)");
     }
 
     #[test]

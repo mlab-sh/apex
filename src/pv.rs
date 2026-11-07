@@ -207,6 +207,17 @@ fn exhibit(h: &mut String, n: usize, root: &Path, iocs: &IocSet) {
         }
         h.push_str("</table>");
     }
+    if let Some(u) = crate::agent::usage(&case) {
+        let _ = write!(
+            h,
+            "<p>Historique d'utilisation conservé par le système (relevé par l'agent APEX), du {} au {} : {} déverrouillage(s){}. Applications les plus ouvertes : {}.</p>",
+            esc(u.first.as_deref().unwrap_or("")),
+            esc(u.last.as_deref().unwrap_or("")),
+            u.unlocks.len(),
+            if u.unlocks.is_empty() { String::new() } else { format!(", dont les plus récents le {}", esc(&u.unlocks.iter().take(5).cloned().collect::<Vec<_>>().join(", le "))) },
+            esc(&u.apps.iter().take(5).map(|(p, n)| format!("{p} ({n} fois)")).collect::<Vec<_>>().join(", "))
+        );
+    }
     let comms = crate::comms::counts(&crate::comms::load(&case));
     if !comms.is_empty() {
         let list: Vec<String> = comms.iter().map(|(k, (n, r))| format!("{n} {k}{}", if *r > 0 { format!(" (dont {r} supprimé(s) récupéré(s))") } else { String::new() })).collect();

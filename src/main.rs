@@ -1071,7 +1071,35 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     if !args.triage {
         println!("\x1b[2m  {} app(s): APK splits + dumpsys…\x1b[0m", packages.len());
     }
+    // --quick still pulls the APKs worth a static analysis: not from a store,
+    // without an icon, or holding accessibility, device admin or notification access.
+    const STORES: &[&str] = &[
+        "com.android.vending", "com.amazon.venezia", "com.sec.android.app.samsungapps", "com.huawei.appmarket",
+        "com.xiaomi.market", "com.xiaomi.discover", "com.heytap.market", "com.oppo.market", "com.vivo.appstore",
+    ];
+    let suspicious: std::collections::HashMap<String, &'static str> = if args.quick {
+        let c = case::Case::load(&out);
+        packages
+            .iter()
+            .filter_map(|p| {
+                let installer = c.packages.iter().find(|x| &x.name == p).and_then(|x| x.installer.clone());
+                let why = if c.accessibility.contains(p) || c.admins.contains(p) || c.notif_listeners.contains(p) {
+                    "privileged"
+                } else if c.launchable.as_ref().is_some_and(|l| !l.contains(p)) {
+                    "no icon"
+                } else if !installer.as_deref().is_some_and(|i| STORES.contains(&i)) {
+                    "not from a store"
+                } else {
+                    return None;
+                };
+                Some((p.clone(), why))
+            })
+            .collect()
+    } else {
+        Default::default()
+    };
     let mut apk_count = 0usize;
+    let mut apk_pulled = 0usize;
     for (i, pkg) in packages.iter().enumerate() {
         let appdir = apps_dir.join(pkg);
         if let Err(e) = std::fs::create_dir_all(&appdir) {
@@ -1081,7 +1109,7 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         // Apps only installed in another user need that user's `pm path`.
         let user = profile_only.iter().find(|(n, _)| n == pkg).map(|(_, u)| *u);
         let paths = phone.apk_paths(pkg, user).unwrap_or_default();
-        if args.quick {
+        if args.quick && !suspicious.contains_key(pkg) {
             // Hashed on the phone: indicator matching by hash and certificate (agent) without the transfer.
             if !paths.is_empty() {
                 acquire_save(&mut phone, &format!("sha256sum {}", paths.join(" ")), &appdir.join("apk_sha256.txt"), &out, &mut collected);
@@ -1096,12 +1124,14 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             let local = appdir.join(base);
             if phone.pull(remote, &local).is_ok() {
                 apk_count += 1;
+                apk_pulled += 1;
             } else {
                 eprintln!("\x1b[33m[warn] {pkg}: pull {remote} failed\x1b[0m");
             }
         }
         acquire_save(&mut phone, &format!("dumpsys package {pkg}"), &appdir.join("dumpsys_package.txt"), &out, &mut collected);
-        println!("  \x1b[32m[{:>3}/{}]\x1b[0m {pkg}  \x1b[2m({} apk)\x1b[0m", i + 1, packages.len(), paths.len());
+        let why = suspicious.get(pkg).map(|w| format!(", pulled: {w}")).unwrap_or_default();
+        println!("  \x1b[32m[{:>3}/{}]\x1b[0m {pkg}  \x1b[2m({} apk{why})\x1b[0m", i + 1, packages.len(), paths.len());
     }
 
     // ---- Evidence bundle (audit trail auto-includes every pull + shell). ----
@@ -1121,10 +1151,10 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
                 println!("\n\x1b[32m✓ Triage done → {}\x1b[0m  \x1b[2m(volatile state, wipe check, identifiers; run a full acquire next)\x1b[0m", out.display());
             } else {
                 println!(
-                "\n\x1b[32m✓ Acquired {} app(s), {} APK(s) {} → {}\x1b[0m",
+                "\n\x1b[32m✓ Acquired {} app(s), {} APK(s): {} → {}\x1b[0m",
                 packages.len(),
                 apk_count,
-                if args.quick { "hashed on the phone (not pulled)" } else { "pulled" },
+                if args.quick { format!("{apk_pulled} pulled (apps worth a static analysis), {} hashed on the phone", apk_count - apk_pulled) } else { "pulled".into() },
                 out.display()
             );
             }

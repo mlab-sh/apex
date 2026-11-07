@@ -263,6 +263,74 @@ pub fn cert_findings(root: &Path, iocs: &crate::ioc::IocSet) -> Vec<crate::model
     out
 }
 
+/// Usage events kept by the system (agent): unlocks, screen on / off, app in
+/// front, boot. Timeline rows.
+pub fn events(case: &crate::case::Case) -> Vec<crate::case::Event> {
+    let Some(v) = load(&case.root) else { return Vec::new() };
+    v["sections"]["usage"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let pkg = e["package"].as_str().unwrap_or("").to_string();
+            let (desc, msg) = match e["type"].as_i64()? {
+                18 => ("usage:unlocked", "phone unlocked".to_string()),
+                17 => ("usage:locked", "lock screen shown".to_string()),
+                15 => ("usage:screen_on", "screen on".to_string()),
+                16 => ("usage:screen_off", "screen off".to_string()),
+                1 => ("usage:app_opened", format!("{pkg} in front")),
+                27 => ("usage:boot", "phone started".to_string()),
+                26 => ("usage:shutdown", "phone shut down".to_string()),
+                _ => return None,
+            };
+            Some(crate::case::Event { local: case.local_from_epoch_ms(e["time_ms"].as_i64()?)?, desc: desc.into(), source: "usage events (APEX agent)".into(), package: if desc == "usage:app_opened" { pkg } else { String::new() }, message: msg })
+        })
+        .collect()
+}
+
+/// Unlock times (device-local, newest first) and apps by times opened, from the agent.
+pub struct Usage {
+    pub unlocks: Vec<String>,
+    pub apps: Vec<(String, usize)>,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+pub fn usage(case: &crate::case::Case) -> Option<Usage> {
+    let ev = events(case);
+    if ev.is_empty() {
+        return None;
+    }
+    let sec = |t: &str| t.get(..19).unwrap_or(t).to_string();
+    let mut unlocks: Vec<String> = ev.iter().filter(|e| e.desc == "usage:unlocked").map(|e| sec(&e.local)).collect();
+    unlocks.reverse();
+    // Home screen and system UI come back between every app: not informative.
+    let chrome = |p: &str| p == PKG || p == "com.android.systemui" || p.contains("launcher") || p.ends_with(".home") || p == "com.miui.home";
+    let mut count: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for e in ev.iter().filter(|e| e.desc == "usage:app_opened" && !chrome(&e.package)) {
+        *count.entry(e.package.clone()).or_default() += 1;
+    }
+    let mut apps: Vec<(String, usize)> = count.into_iter().collect();
+    apps.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut times: Vec<&String> = ev.iter().map(|e| &e.local).collect();
+    times.sort();
+    Some(Usage { unlocks, apps, first: times.first().map(|s| sec(s)), last: times.last().map(|s| sec(s)) })
+}
+
+/// SIM details read by the agent: (key, value) for the identifiers sheet.
+pub fn sim_identifiers(root: &Path) -> Vec<(&'static str, String)> {
+    let Some(v) = load(root) else { return Vec::new() };
+    let mut out = Vec::new();
+    for x in v["sections"]["telephony"].as_array().into_iter().flatten().filter(|x| x.get("slot").is_some()) {
+        for (k, f) in [("line_number", "number"), ("iccid", "iccid"), ("sim_operator", "carrier")] {
+            if let Some(s) = x[f].as_str().filter(|s| !s.is_empty()) {
+                out.push((k, s.to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// The agent's JSON from a case, if it ran.
 pub fn load(case_root: &Path) -> Option<Value> {
     serde_json::from_slice(&std::fs::read(case_root.join("agent/agent.json")).ok()?).ok()

@@ -225,6 +225,13 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
     }
     h.push_str("</table></div>");
 
+    // --- Phone use (APEX agent): when it was unlocked, which apps were opened.
+    if let Some(u) = crate::agent::usage(case) {
+        let _ = write!(h, "<h2>Phone use</h2><p class=\"mut\">Usage events kept by the system, read by the APEX agent, from {} to {}.</p><table class=\"kv\">", esc(u.first.as_deref().unwrap_or("")), esc(u.last.as_deref().unwrap_or("")));
+        let _ = write!(h, "<tr><th>Unlocks</th><td>{} — latest: {}</td></tr>", u.unlocks.len(), esc(&u.unlocks.iter().take(10).cloned().collect::<Vec<_>>().join(", ")));
+        let _ = write!(h, "<tr><th>Apps opened most</th><td>{}</td></tr></table>", esc(&u.apps.iter().take(10).map(|(p, n)| format!("{p} ({n})")).collect::<Vec<_>>().join(", ")));
+    }
+
     if !case.users.is_empty() {
         h.push_str("<h2>Users and profiles</h2><table><tr><th>ID</th><th>Name</th><th>Kind</th><th>Running</th></tr>");
         for u in &case.users {

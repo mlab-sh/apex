@@ -34,5 +34,7 @@ unlisted in [`verify`](Verify).
 5. Media with a location, with map links.
 6. User-installed apps: installer, sideloaded, hidden, privileges, users,
    traffic.
-7. Users and profiles.
-8. Method and limits.
+7. Phone use (with the [agent](Agent)): period covered, number of unlocks and
+   the latest ones, apps opened most.
+8. Users and profiles.
+9. Method and limits.

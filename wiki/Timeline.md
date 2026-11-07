@@ -36,6 +36,8 @@ battery history in the bugreport); uploads over 1 MB per app and period
 (network statistics); app-op accesses (camera, microphone, location…); usage
 events; logcat; camera service events; notifications active at acquisition;
 file modification times; communications (under mandate); dated media with
-their position.
+their position; with the [APEX agent](Agent), the usage events the system
+keeps: **phone unlocked**, lock screen, screen on / off, app in front, boot
+and shutdown (`usage:*`).
 
 The terminal prints the count per source.

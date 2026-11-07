@@ -41,6 +41,8 @@ apex pv ./case-42 ./case-43 --service "Brigade de recherches de …" --officer "
   was declared, the PV says so and asks you to complete it.
 - Integrity: manifest SHA-256, verification result, RFC 3161 timestamp.
 - Findings of medium severity and above (titles in English).
+- Phone use (with the [agent](Agent)): period, number of unlocks and the
+  latest ones, apps opened most.
 - Communication counts under mandate.
 - Method, then a signature block.
 

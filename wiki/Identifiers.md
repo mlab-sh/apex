@@ -30,7 +30,8 @@ apex identifiers ./case-42 --json -o identifiers.json
 | Apps whose operator holds data | ride-hailing (Uber, Bolt, Heetch…), delivery, payment (PayPal, Lydia, Revolut), crypto wallets and exchanges, encrypted messaging, social, marketplaces | installed packages |
 
 The line number is only known if the SIM or the operator stored it; it is
-often missing.
+often missing. When the [APEX agent](Agent) ran, each SIM's line number,
+ICCID and carrier as Android reports them are added.
 
 Android 13+ masks account names in `dumpsys account` (`abc***@gmail.com`).
 When the [APEX agent](Agent) ran, APEX replaces each masked name with the

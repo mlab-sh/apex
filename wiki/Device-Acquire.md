@@ -37,7 +37,7 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
 | `--notification-content` | notifications unredacted (titles, message previews); only under mandate |
 | `--storage` | pull shared storage (`/sdcard`: photos, videos, downloads, messaging media), without `Android/data` and `Android/obb` |
 | `--backup` | Android backup (`bu backup -all -noapk`) of the apps that allow it; confirm on the phone with an **empty** password |
-| `--quick` | **shortest time plugged in**: APKs hashed on the phone (`sha256sum`) instead of pulled, no bugreport, logcat or usage-stats dump (the [agent](Agent) gives usage events and signing certificates). ≈ 40–60 s |
+| `--quick` | **shortest time plugged in**: APKs hashed on the phone (`sha256sum`) instead of pulled, **except the apps worth a static analysis**, which are pulled: not installed from a store, without a launcher icon, or holding accessibility, device admin or notification access. No bugreport, logcat or usage-stats dump (the [agent](Agent) gives usage events and signing certificates). ≈ 40–60 s |
 | `--no-agent` | do not install the [APEX agent](Agent) |
 | `--package <PKG>` | acquire only this app (device state is still collected) |
 | `--no-bugreport` | skip the bugreport (1–5 min, 10–100 MB); loses battery history and some install history |
@@ -110,9 +110,11 @@ for what is reachable live and what needs an extraction.
 
 ## With `--quick`
 
-Static analysis of the apps needs their APKs: run [`device scan`](Device) or a
-full acquisition later if you need it. Indicator matching still works: APK
-hashes from the phone, signing certificates from the agent.
+The suspicious apps (not from a store, hidden, privileged) are pulled and get
+the full static analysis; the line of each app says why it was pulled. For the
+others, indicator matching still works: APK hashes from the phone, signing
+certificates from the agent. Run [`device scan`](Device) or a full
+acquisition later if you need every APK.
 
 ## Next
 
