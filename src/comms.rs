@@ -230,14 +230,14 @@ pub fn db_name(rel: &str) -> Option<(&'static str, String)> {
 }
 
 /// An opened copy of a database + its live rowids and carved records.
-struct Dbx {
+pub struct Dbx {
     conn: rusqlite::Connection,
     main: Vec<u8>,
     wal: Option<Vec<u8>>,
     _tmp: tempfile::TempDir,
 }
 
-fn open(dir: &Path, name: &str) -> Option<Dbx> {
+pub fn open(dir: &Path, name: &str) -> Option<Dbx> {
     let main = std::fs::read(dir.join(name)).ok()?;
     let wal = std::fs::read(dir.join(format!("{name}-wal"))).ok();
     // Work on a temp copy: opening applies the WAL, which must not touch the evidence.
@@ -251,12 +251,12 @@ fn open(dir: &Path, name: &str) -> Option<Dbx> {
 }
 
 impl Dbx {
-    fn has(&self, table: &str) -> bool {
+    pub fn has(&self, table: &str) -> bool {
         self.conn.query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", [table], |_| Ok(())).is_ok()
     }
 
     /// Column names, and the INTEGER PRIMARY KEY column (stored as NULL in records).
-    fn cols(&self, table: &str) -> (Vec<String>, Option<usize>) {
+    pub fn cols(&self, table: &str) -> (Vec<String>, Option<usize>) {
         let mut st = match self.conn.prepare(&format!("PRAGMA table_info({table})")) {
             Ok(s) => s,
             Err(_) => return (Vec::new(), None),
@@ -268,7 +268,7 @@ impl Dbx {
 
     /// Deleted rows of `table`: carved records with the table's column count
     /// whose rowid is gone, as column → value.
-    fn deleted(&self, table: &str, check: impl Fn(&BTreeMap<String, Val>) -> bool) -> Vec<BTreeMap<String, Val>> {
+    pub fn deleted(&self, table: &str, check: impl Fn(&BTreeMap<String, Val>) -> bool) -> Vec<BTreeMap<String, Val>> {
         let (cols, ipk) = self.cols(table);
         if cols.is_empty() {
             return Vec::new();
@@ -299,15 +299,15 @@ impl Dbx {
     }
 }
 
-fn vi(m: &BTreeMap<String, Val>, k: &str) -> i64 {
+pub fn vi(m: &BTreeMap<String, Val>, k: &str) -> i64 {
     m.get(k).and_then(Val::int).unwrap_or(0)
 }
-fn vs(m: &BTreeMap<String, Val>, k: &str) -> String {
+pub fn vs(m: &BTreeMap<String, Val>, k: &str) -> String {
     m.get(k).and_then(|v| v.text().map(String::from)).unwrap_or_default()
 }
 
 /// Rows of a query as column → value.
-fn rows(db: &Dbx, sql: &str) -> Vec<BTreeMap<String, Val>> {
+pub fn rows(db: &Dbx, sql: &str) -> Vec<BTreeMap<String, Val>> {
     let Ok(mut st) = db.conn.prepare(sql) else { return Vec::new() };
     let names: Vec<String> = st.column_names().iter().map(|s| s.to_string()).collect();
     st.query_map([], |r| {
@@ -408,7 +408,7 @@ fn contacts(db: &Dbx) -> Vec<Comm> {
     .collect()
 }
 
-fn whatsapp(db: &Dbx, names: &BTreeMap<String, String>) -> Vec<Comm> {
+pub fn whatsapp(db: &Dbx, names: &BTreeMap<String, String>) -> Vec<Comm> {
     let label = |jid: &str| match names.get(jid) {
         Some(n) if !n.is_empty() => format!("{jid} ({n})"),
         _ => jid.to_string(),
@@ -458,8 +458,34 @@ fn whatsapp(db: &Dbx, names: &BTreeMap<String, String>) -> Vec<Comm> {
     out
 }
 
+/// TL string at `i`: (text, next offset).
+fn tl_string(b: &[u8], i: usize) -> Option<String> {
+    let (len, start) = match *b.get(i)? {
+        254 => (*b.get(i + 1)? as usize | (*b.get(i + 2)? as usize) << 8 | (*b.get(i + 3)? as usize) << 16, i + 4),
+        255 => return None,
+        n => (n as usize, i + 1),
+    };
+    std::str::from_utf8(b.get(start..start + len)?).ok().map(String::from)
+}
+
+/// Text of a TL `message`: in every layer, the `message` string directly
+/// follows the `date` field, which the row also stores; fall back to the
+/// longest printable string.
+pub fn tl_message(b: &[u8], date: i64) -> String {
+    let d = (date as i32).to_le_bytes();
+    let mut i = 0;
+    while let Some(p) = b.get(i..).and_then(|r| r.windows(4).position(|w| w == d)) {
+        let at = i + p + 4;
+        if let Some(s) = tl_string(b, at).filter(|s| s.is_empty() || s.chars().all(|c| !c.is_control() || c == '\n')) {
+            return s;
+        }
+        i = at;
+    }
+    tl_text(b)
+}
+
 /// Longest printable TL-serialized string in a Telegram message blob.
-// ponytail: heuristic over the TL layout; a real TL schema decoder would be per-layer.
+// ponytail: heuristic fallback when the date anchor is not found.
 pub fn tl_text(b: &[u8]) -> String {
     let mut best = String::new();
     let mut i = 0;
@@ -492,7 +518,7 @@ fn telegram(db: &Dbx) -> Vec<Comm> {
             direction: if vi(m, "out") == 1 { "out".into() } else { "in".into() },
             peer,
             text: match m.get("data") {
-                Some(Val::Blob(b)) => tl_text(b),
+                Some(Val::Blob(b)) => tl_message(b, vi(m, "date")),
                 _ => String::new(),
             },
             extra: String::new(),
@@ -529,9 +555,14 @@ fn chrome(db: &Dbx) -> Vec<Comm> {
 
 /// Every communication record in the case, sorted by time.
 pub fn load(case: &Case) -> Vec<Comm> {
+    load_with(case, &crate::appdata::Keys::default()).0
+}
+
+/// Same, with examiner-supplied keys; also returns notes on what could not be read.
+pub fn load_with(case: &Case, keys: &crate::appdata::Keys) -> (Vec<Comm>, Vec<String>) {
     let dir = case.root.join("comms");
     if !dir.is_dir() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut out = live(&dir);
     let db = dir.join("db");
@@ -549,9 +580,10 @@ pub fn load(case: &Case) -> Vec<Comm> {
         out.extend(contacts(&d));
     }
     let names: BTreeMap<String, String> = open(&db, "wa.db").map(|d| rows(&d, "SELECT jid, display_name FROM wa_contacts").iter().map(|m| (vs(m, "jid"), vs(m, "display_name"))).collect()).unwrap_or_default();
-    if let Some(d) = open(&db, "msgstore.db") {
-        out.extend(whatsapp(&d, &names));
-    }
+    let live_wa: Vec<Comm> = open(&db, "msgstore.db").map(|d| whatsapp(&d, &names)).unwrap_or_default();
+    let (app, notes) = crate::appdata::load(&dir, keys, &live_wa, &names);
+    out.extend(live_wa);
+    out.extend(app);
     if let Some(d) = open(&db, "cache4.db") {
         out.extend(telegram(&d));
     }
@@ -564,7 +596,7 @@ pub fn load(case: &Case) -> Vec<Comm> {
         }));
     }
     out.sort_by(|a, b| a.time_ms.cmp(&b.time_ms).then(a.kind.cmp(b.kind)));
-    out
+    (out, notes)
 }
 
 pub fn events(case: &Case) -> Vec<Event> {
@@ -598,7 +630,19 @@ pub fn export(case: &Case, items: &[Comm], dir: &Path) -> Result<Vec<PathBuf>, S
         s.push_str(&format!("{},{},{},{},{},{},{},{}\n", csv(&when(c)), c.kind, c.direction, csv(&c.peer), csv(&c.text), csv(&c.extra), csv(&c.source), c.recovered));
     }
     let j: Vec<_> = items.iter().map(|c| json!({"time": when(c), "kind": c.kind, "direction": c.direction, "peer": c.peer, "text": c.text, "extra": c.extra, "source": c.source, "recovered": c.recovered})).collect();
-    let files = [(dir.join("comms.csv"), s), (dir.join("comms.json"), serde_json::to_string_pretty(&j).unwrap_or_default())];
+    let mut files = vec![(dir.join("comms.csv"), s), (dir.join("comms.json"), serde_json::to_string_pretty(&j).unwrap_or_default())];
+    let x = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let pins: String = items
+        .iter()
+        .filter(|c| c.kind == "location")
+        .filter_map(|c| {
+            let (la, lo) = c.extra.split_once(',')?;
+            Some(format!("<Placemark><name>{}</name><description>{} — {} ({})</description><Point><coordinates>{lo},{la}</coordinates></Point></Placemark>\n", x(&c.peer), x(&when(c)), x(&c.text), x(&c.source)))
+        })
+        .collect();
+    if !pins.is_empty() {
+        files.push((dir.join("locations.kml"), format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\"><Document>\n{pins}</Document></kml>\n")));
+    }
     let mut out = Vec::new();
     for (p, b) in files {
         std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -641,6 +685,16 @@ mod tests {
         b.push(11);
         b.extend(b"hello world");
         assert_eq!(tl_text(&b), "hello world");
+        // message: flags, id, peer…, date (0x65000000), then the text.
+        let date: i64 = 0x6500_0000;
+        let mut m = vec![0xaa, 0xbb, 0xcc, 0xdd, 0, 0, 0, 0, 5, 0, 0, 0, 2, 0, 0, 0];
+        m.extend((date as i32).to_le_bytes());
+        m.push(9);
+        m.extend(b"rdv 22h ?");
+        m.extend([0, 0]);
+        m.push(30);
+        m.extend(b"a much longer unrelated string");
+        assert_eq!(tl_message(&m, date), "rdv 22h ?");
     }
 
     #[test]

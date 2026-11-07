@@ -337,11 +337,16 @@ impl Phone {
     /// Pull a remote file into a local path.
     pub fn pull(&mut self, remote: &str, local: &Path) -> Result<(), String> {
         let started = Instant::now();
+        if let Some(p) = local.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
         let mut f = std::fs::File::create(local)
             .map_err(|e| format!("cannot create {}: {e}", local.display()))?;
         let src = remote.to_string();
         let action = format!("pull: {remote} -> {}", local.display());
         if let Err(e) = self.dev.pull(&src, &mut f) {
+            drop(f);
+            let _ = std::fs::remove_file(local);
             let err = format!("pull '{remote}' failed: {e}");
             self.record(action, started, false, None, Some(err.clone()));
             return Err(err);

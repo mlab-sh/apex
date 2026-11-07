@@ -35,12 +35,14 @@ adb_client = { version = "3.2.2", default-features = false, features = ["usb"] }
 rusb = "0.9"
 flate2 = "1"
 tar = "0.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 kamadak-exif = "0.6"
 regex = "1"
 ureq = "2"
 p256 = { version = "0.13", features = ["ecdsa"] }
 p384 = { version = "0.13", features = ["ecdsa"] }
+aes-gcm = "0.10"
+hmac = "0.12"
 
 [profile.release]
 opt-level = 3

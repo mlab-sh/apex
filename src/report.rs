@@ -115,6 +115,9 @@ pub fn render(case: &Case, iocs: &IocSet, extra: Vec<Finding>) -> String {
     for a in idv["accounts"].as_array().into_iter().flatten() {
         let _ = write!(h, "<tr><th>{}</th><td>{}</td></tr>", esc(a["service"].as_str().unwrap_or("")), esc(a["name"].as_str().unwrap_or("")));
     }
+    for a in idv["apps_of_interest"].as_array().into_iter().flatten() {
+        let _ = write!(h, "<tr><th>{}</th><td>{} · {}</td></tr>", esc(a["operator"].as_str().unwrap_or("")), esc(a["category"].as_str().unwrap_or("")), esc(a["package"].as_str().unwrap_or("")));
+    }
     h.push_str("</table>");
 
     // --- Findings.

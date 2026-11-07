@@ -24,6 +24,12 @@ Android security analysis and phone investigation, in one self-contained binary.
   procès-verbal for one or several exhibits, cross-search and entity
   extraction (phones, e-mails, IBANs, crypto addresses).
 
+**Documentation: the [wiki](https://github.com/mlab-sh/apex/wiki)**: a page
+per command with its prerequisites, the [field procedure](https://github.com/mlab-sh/apex/wiki/Field-Procedure)
+for a search, the [prerequisites matrix](https://github.com/mlab-sh/apex/wiki/Prerequisites)
+and [troubleshooting](https://github.com/mlab-sh/apex/wiki/Troubleshooting).
+Its source is the [`wiki/`](wiki) folder, mirrored on every push.
+
 ## Install
 
 ### Homebrew (macOS & Linux)
@@ -150,7 +156,15 @@ apex comms ./case-42 -o ./case-42-comms                        # comms.csv + com
 | Call log | `content query` | `calllog.db` / `contacts2.db` |
 | Contacts | usually refused to the shell | `contacts2.db` (incl. contacts flagged deleted) |
 | WhatsApp (messages, media paths, contact names) | no | `msgstore.db` (current and legacy schema), `wa.db` |
-| Telegram | no | `cache4.db` (text extracted from message blobs, best effort) |
+| WhatsApp backups `.crypt14` / `.crypt15` | pulled from shared storage | decrypted with `files/key`, or the 64-digit key (`--wa-key`) |
+| Signal | no | `signal.db` (SQLCipher): secret from the app settings, or `--signal-key` |
+| Telegram | no | `cache4.db` (text located after the message date in the TL blob) |
+| Messenger, Instagram | no | `msys_database_*`, `threads_db2`, `direct.db` |
+| Snapchat | no | `arroyo.db` + `main.db` (text from protobuf, best effort) |
+| Google Maps | no | navigation destinations, saved places (`locations.kml`) |
+| Gboard | no | clipboard, typed-text cache (best effort) |
+| Gmail | no | `mailstore.*.db`; `bigTopDataDB.*` (best effort) |
+| Crypto wallets | no | Bitcoin / Ethereum addresses in the app settings and databases |
 | Chrome history and downloads | no | `History` |
 | Calendar | `content query` | `calendar.db` (incl. events flagged deleted) |
 | Apps that allow Android backup | `--backup` (confirm on the phone, empty password) | — |
@@ -167,6 +181,22 @@ recovered (`[recovered deleted record]` in the timeline, finding
 `CASE_DELETED_COMMS_RECOVERED`). Unallocated space inside live pages is not
 carved. Databases are always opened from a temporary copy, so the evidence is
 never modified.
+
+**Keys.** Signal keeps its database secret in clear only in older versions;
+newer ones protect it with the Android Keystore, so the lab must recover it
+(`apex comms --signal-key <hex>`). WhatsApp backups decrypt with
+`data/data/com.whatsapp/files/key` (local backups) or
+`files/encrypted_backup.key` (end-to-end backups) from the extraction, or with
+the 64-digit end-to-end backup key (`--wa-key`). On a live phone without root
+these key files are out of reach: the backup is collected, the key comes from
+the lab extraction. Backup messages missing from the
+live `msgstore.db` are reported as recovered: they were deleted after the
+backup. `apex comms` says which sources it could not open and why. Signal rows
+deleted before the seizure are not recovered (free pages stay encrypted).
+
+**Operators.** `apex identifiers` and the finding `CASE_APPS_OF_INTEREST` list
+installed apps whose operator keeps data worth a legal request (ride-hailing,
+delivery, payment, wallets, encrypted messaging, social).
 
 Everything goes into the timeline. The HTML report only shows counts per kind;
 content is exported with `apex comms`.

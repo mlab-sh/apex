@@ -276,7 +276,9 @@ pub fn identifiers(case: &crate::case::Case) -> Value {
         .map(|(t, n)| json!({"service": service(&t), "type": t, "name": n}))
         .collect();
 
-    json!({"device": device, "telephony": tel, "network": net, "accounts": accounts})
+    let apps: Vec<Value> = crate::appdata::apps_of_interest(case.third_party.iter()).into_iter().map(|(p, c, o)| json!({"package": p, "category": c, "operator": o})).collect();
+
+    json!({"device": device, "telephony": tel, "network": net, "accounts": accounts, "apps_of_interest": apps})
 }
 
 /// Terminal rendering of `identifiers()`.
@@ -297,6 +299,12 @@ pub fn print_identifiers(v: &Value) {
         println!("{b}Accounts{z}");
         for x in a {
             println!("  {:<24} {}  {d}({}){z}", x["service"].as_str().unwrap_or(""), x["name"].as_str().unwrap_or(""), x["type"].as_str().unwrap_or(""));
+        }
+    }
+    if let Some(a) = v["apps_of_interest"].as_array().filter(|a| !a.is_empty()) {
+        println!("{b}Apps whose operator holds data (legal requests){z}");
+        for x in a {
+            println!("  {:<24} {:<20} {d}{}{z}", x["operator"].as_str().unwrap_or(""), x["category"].as_str().unwrap_or(""), x["package"].as_str().unwrap_or(""));
         }
     }
 }

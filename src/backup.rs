@@ -105,6 +105,10 @@ pub fn extract(ab: &Path, out: &Path, mandate: bool) -> Result<Vec<String>, Stri
                 std::fs::create_dir_all(out.join("comms/db")).map_err(|e| e.to_string())?;
                 std::fs::write(out.join(&rel), &data).map_err(|e| e.to_string())?;
                 written.push(rel);
+            } else if let Some(rel) = data_path(&p).and_then(|d| crate::appdata::target(&d, data.len() as u64)) {
+                std::fs::create_dir_all(out.join(&rel).parent().unwrap()).map_err(|e| e.to_string())?;
+                std::fs::write(out.join(&rel), &data).map_err(|e| e.to_string())?;
+                written.push(rel);
             }
         }
     }

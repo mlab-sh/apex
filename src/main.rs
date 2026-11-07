@@ -2,6 +2,7 @@
 
 mod adb_checks;
 mod abx;
+mod appdata;
 mod analyzers;
 mod artifacts;
 mod backup;
@@ -139,6 +140,12 @@ struct CommsArgs {
     /// Output directory (default: <case>_comms)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+    /// Signal database secret (hex), when the extraction does not hold it in clear (Keystore-protected)
+    #[arg(long = "signal-key")]
+    signal_key: Option<String>,
+    /// WhatsApp 64-digit end-to-end backup key (hex), to decrypt .crypt15 backups without files/key
+    #[arg(long = "wa-key")]
+    wa_key: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -879,6 +886,20 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
             }
         }
     }
+    if args.mandate.is_some() {
+        // WhatsApp backups sit on shared storage: readable without root, decryptable with the key.
+        for dir in appdata::WA_BACKUP_LIVE {
+            let ls = phone.run(&format!("ls -1 '{dir}' 2>/dev/null")).unwrap_or_default();
+            for name in ls.lines().map(str::trim).filter(|n| appdata::is_wa_backup(n)) {
+                let pkg = if dir.contains("w4b") { "com.whatsapp.w4b" } else { "com.whatsapp" };
+                let p = out.join("comms/app").join(pkg).join("backups").join(name);
+                let remote = format!("{dir}/{name}");
+                if phone.pull(&remote, &p).is_ok() {
+                    collected.push(json!({"file": p.strip_prefix(&out).unwrap_or(&p).to_string_lossy(), "sha256": scanner::compute_hash(&p).unwrap_or_default(), "bytes": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "source_cmd": format!("pull {remote}")}));
+                }
+            }
+        }
+    }
     if args.backup {
         println!("\x1b[2m  Android backup…\x1b[0m");
         match backup::run(&mut phone, &out).and_then(|ab| backup::extract(&ab, &out, args.mandate.is_some())) {
@@ -1542,7 +1563,10 @@ fn run_comms(args: CommsArgs) -> ExitCode {
         return ExitCode::from(1);
     }
     let c = case::Case::load(&args.case);
-    let items = comms::load(&c);
+    let (items, notes) = comms::load_with(&c, &appdata::Keys { signal: args.signal_key.clone(), whatsapp: args.wa_key.clone() });
+    for n in &notes {
+        eprintln!("\x1b[33m  ⚠ {n}\x1b[0m");
+    }
     if items.is_empty() {
         eprintln!("\x1b[33mNo communications in this case: acquire or import it with --mandate <reference>.\x1b[0m");
         return ExitCode::from(1);

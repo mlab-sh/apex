@@ -471,6 +471,22 @@ impl Case {
 
     fn comms_media_findings(&self) -> Vec<Finding> {
         let mut out = Vec::new();
+        let apps = crate::appdata::apps_of_interest(self.third_party.iter());
+        if !apps.is_empty() {
+            out.push(
+                Finding::new(
+                    "CASE_APPS_OF_INTEREST",
+                    format!("{} app(s) whose operator holds data worth a legal request", apps.len()),
+                    format!(
+                        "{}. Trips, payments, messages metadata or wallet addresses are kept server-side: request them from the operator (see `apex identifiers`).",
+                        apps.iter().map(|(_, c, o)| format!("{o} ({c})")).collect::<Vec<_>>().join(", ")
+                    ),
+                    Severity::Info,
+                    "investigation",
+                )
+                .meta("apps", json!(apps.iter().map(|(p, c, o)| json!({"package": p, "category": c, "operator": o})).collect::<Vec<_>>())),
+            );
+        }
         let items = crate::comms::load(self);
         if !items.is_empty() {
             let counts = crate::comms::counts(&items);

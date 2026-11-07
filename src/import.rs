@@ -408,6 +408,7 @@ pub fn import(src: &Path, out: &Path, case_meta: Value, opts: Options) -> Result
                 crate::comms::db_name(rel)
                     .map(|(name, ext)| format!("comms/db/{name}{ext}"))
                     .or_else(|| rel.strip_prefix(crate::comms::MMS_PARTS_DIR).map(|f| format!("comms/mms_parts/{f}")))
+                    .or_else(|| crate::appdata::target(rel, size))
             } else {
                 None
             }
