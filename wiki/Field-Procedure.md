@@ -86,6 +86,36 @@ Keep the phone **unlocked and awake** throughout. Options:
 
 Details: [device acquire](Device-Acquire).
 
+Record each change you made to the phone so it appears in the manifest and
+the procès-verbal:
+
+```sh
+apex device acquire --mandate "JIRS-2026-17" \
+  --phone-change "10:41 Options pour les développeurs activées" \
+  --phone-change "10:42 Débogage USB activé" \
+  --phone-change "10:44 Mode avion activé" \
+  -o ./2026-0142_s1
+```
+
+## 4b. Messaging apps (under mandate)
+
+A live phone does not give app databases. In order of preference (details:
+[Getting conversations from an unlocked phone](Communications-and-App-Data#getting-conversations-from-an-unlocked-phone)):
+
+1. **Signal**: turn on chat backups, note the 30-digit passphrase, create a
+   backup. **WhatsApp**: turn on end-to-end backup with the 64-digit key (needs
+   the network), Google backup on "Never", back up. Then run the acquisition
+   above (it collects the backup files) and decrypt:
+   ```sh
+   apex comms ./2026-0142_s1 --signal-passphrase "…" --wa-key …
+   ```
+2. **Other apps**: open each conversation and capture it, one directory per
+   conversation:
+   ```sh
+   apex device capture --mandate "JIRS-2026-17" --label "Telegram — X" -o ./2026-0142_s1_capture_x
+   ```
+   On Xiaomi, this needs *USB debugging (Security settings)*: record it.
+
 ## 5. Integrity
 
 Right after the acquisition, on the computer:

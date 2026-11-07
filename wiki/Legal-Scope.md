@@ -17,12 +17,14 @@ Notifications are captured **redacted** (which app, when; no text).
 ## Only with `--mandate <reference>`
 
 - SMS and MMS with attachments, call log, contacts, calendar.
-- WhatsApp backups found on shared storage.
+- WhatsApp and Signal backups found on shared storage.
 - From an extraction: messaging databases and app data (WhatsApp, Signal,
   Telegram, Messenger, Instagram, Snapchat, Gmail, browser history, Google
   Maps, keyboard, wallets). See [Communications and app data](Communications-and-App-Data).
 - `--notification-content`: notification texts, which include message
   previews.
+- [`device capture`](Device-Capture): the conversation on screen (the
+  mandate reference is required on the command line).
 
 ## Only when asked
 
@@ -40,7 +42,9 @@ Notifications are captured **redacted** (which app, when; no text).
 
 ## Changes to the phone
 
-Enabling developer options and USB debugging, airplane mode, confirming a
-backup: these are made by the examiner and must be written in the PV. What
+Enabling developer options and USB debugging, airplane mode, turning on an
+app's backup, confirming a backup: these are made by the examiner. Declare
+each with `--phone-change "HH:MM what"`: it is recorded in the manifest and
+listed in the PV. What
 APEX itself writes on the phone is listed on
 [device acquire](Device-Acquire#what-it-changes-on-the-phone).

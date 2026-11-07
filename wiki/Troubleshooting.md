@@ -40,6 +40,23 @@ Several phones are plugged in. `apex device listen` prints their serials; add
 Another `apex` comes first on the `PATH`: `which -a apex`, `apex --version`.
 See [Installation](Installation#check-which-apex-runs).
 
+## `capture`: `the phone refuses simulated touches (INJECT_EVENTS)`
+
+Xiaomi / Redmi / POCO (MIUI, HyperOS) block simulated touches from ADB.
+Developer options → **USB debugging (Security settings)**: turn it on (it asks
+for a Mi account, sometimes a SIM card). Record the change with
+`--phone-change`. Other makers usually need nothing.
+
+## `capture` stops after a few screens
+
+The app loaded older messages too slowly and two screens looked identical.
+Raise `--settle-ms` (e.g. 2000) and run again.
+
+## `comms`: `⚠ Signal backup …: wrong passphrase`
+
+The 30 digits do not match this backup. Each time backups are turned on again,
+Signal makes a new passphrase: use the one shown when this backup was made.
+
 ## `comms`: `No communications in this case`
 
 The case was acquired or imported without `--mandate`. Acquire or import it

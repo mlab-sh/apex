@@ -13,6 +13,7 @@ text, crypto wallet addresses. Deleted records recovered are flagged.
 | For app data (WhatsApp databases, Signal, Messenger…): a case from [`import`](Import) of an after-first-unlock extraction | a live phone without root gives SMS, MMS, calls, calendar and WhatsApp backup files only |
 | For **Signal**: its database secret, found automatically in older versions; otherwise `--signal-key <hex>` from the lab | newer Signal versions protect it with the Android Keystore |
 | For **WhatsApp backups**: `files/key` or `files/encrypted_backup.key` in the extraction, or the 64-digit end-to-end key (`--wa-key`) | on a live phone without root these key files are out of reach |
+| For **Signal backups** (`signal-*.backup`): the 30-digit passphrase (`--signal-passphrase`) | shown once, when chat backups are turned on in Signal |
 
 No phone, no network. Details per source: [Communications and app data](Communications-and-App-Data).
 
@@ -23,6 +24,7 @@ apex comms ./case-42                                  # → ./case-42_comms/
 apex comms ./case-42 -o ./case-42-comms
 apex comms ./case-42 --signal-key 9f8e7d…             # Signal secret recovered by the lab
 apex comms ./case-42 --wa-key 3a1f…                   # WhatsApp 64-digit end-to-end key, no spaces
+apex comms ./case-42 --signal-passphrase "12345 12345 12345 12345 12345 12345"
 ```
 
 | Option | Effect |
@@ -30,6 +32,7 @@ apex comms ./case-42 --wa-key 3a1f…                   # WhatsApp 64-digit end-
 | `-o, --output <DIR>` | output directory (default `<case>_comms`) |
 | `--signal-key <HEX>` | Signal database secret |
 | `--wa-key <HEX>` | WhatsApp 64-digit end-to-end backup key (type it without the spaces WhatsApp shows) |
+| `--signal-passphrase <DIGITS>` | Signal backup passphrase, 30 digits (spaces allowed) |
 
 Prefer typing keys yourself in a terminal over pasting them into shared notes:
 they unlock everything the backup holds.
@@ -42,9 +45,29 @@ the reason (missing key, encrypted database…).
 
 | File | Content |
 |---|---|
+| `comms.db` | SQLite, table `comms`, indexed on time, kind and peer: query it with SQL |
 | `comms.csv` | `time, kind, direction, peer, text, extra, source, recovered` |
 | `comms.json` | the same, as JSON |
 | `locations.kml` | Google Maps destinations and saved places, when present |
+| `signal_files/<backup>/{attachment,avatar,sticker}/…` | files carried by Signal backups, extension from their content |
+
+### `comms.db`
+
+| Column | Content |
+|---|---|
+| `time` | phone local time, ISO 8601 with UTC offset |
+| `time_ms` | epoch milliseconds (0 = unknown, e.g. contacts) |
+| `kind` | `sms`, `mms`, `call`, `contact`, `calendar`, `whatsapp`, `signal`, `telegram`, `messenger`, `instagram`, `snapchat`, `email`, `web`, `download`, `location`, `clipboard`, `keyboard`, `wallet` |
+| `direction` | `in`, `out`, `missed`, … or empty |
+| `peer` | number, JID, user ID with name |
+| `text`, `extra` | message text; duration, attachment, coordinates `lat,lon` |
+| `source` | database or backup file it comes from |
+| `recovered` | 1 = deleted record recovered |
+
+```sh
+sqlite3 case-42_comms/comms.db "SELECT time, kind, peer, text FROM comms WHERE text LIKE '%colis%' ORDER BY time_ms"
+sqlite3 case-42_comms/comms.db "SELECT peer, count(*) FROM comms GROUP BY peer ORDER BY 2 DESC LIMIT 10"
+```
 
 `time` is the phone's local time with its UTC offset. `recovered = true`
 marks a record deleted from the database and carved back, or a WhatsApp

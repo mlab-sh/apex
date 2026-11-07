@@ -35,8 +35,10 @@ apex pv ./case-42 ./case-43 --service "Brigade de recherches de …" --officer "
 - Device: make, model, serial, IMEI, line number, SIM.
 - State at reception: clock and skew, battery, airplane mode, Wi-Fi,
   Bluetooth, network, remote-wipe risk.
-- Operations: nature, start and end, link (USB / TCP), commands issued,
-  mandate, tool version.
+- Operations: nature (acquisition, triage, import, screen capture), start and
+  end, link (USB / TCP), commands issued, mandate, captured app, tool version.
+- Changes made to the phone by the examiner, from `--phone-change`; if none
+  was declared, the PV says so and asks you to complete it.
 - Integrity: manifest SHA-256, verification result, RFC 3161 timestamp.
 - Findings of medium severity and above (titles in English).
 - Communication counts under mandate.
@@ -46,7 +48,8 @@ Every statement comes from the hashed case files.
 
 ## What you must add
 
-APEX cannot know: who unlocked the phone and how the code was obtained, the
-settings you changed (developer options, USB debugging, airplane mode) and
-when, anything done on the phone outside APEX. Complete the PV before
-signing it.
+APEX cannot know who unlocked the phone and how the code was obtained, or
+anything done on the phone outside APEX. Declare the settings you changed
+(developer options, USB debugging, airplane mode, backups) with
+`--phone-change` at acquisition so they appear in the PV; complete the rest
+before signing it.

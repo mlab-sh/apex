@@ -31,8 +31,9 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
 |---|---|
 | `-o, --output <DIR>` | case directory (default `./apex_acquire`) |
 | `--case-id`, `--examiner`, `--case-notes`, `--seal` | case metadata, recorded in the manifest, the report and the PV |
+| `--phone-change <TEXT>` | a change you made to the phone, with its time (repeatable): recorded and listed in the PV |
 | `--triage` | volatile state, remote-wipe check and identifiers only (< 1 min); no apps, no history |
-| `--mandate <REF>` | also collect SMS, MMS (+ attachments), call log, calendar, contacts if the phone allows it, and WhatsApp backups from shared storage; the reference is recorded |
+| `--mandate <REF>` | also collect SMS, MMS (+ attachments), call log, calendar, contacts if the phone allows it, and WhatsApp and Signal backups from shared storage; the reference is recorded |
 | `--notification-content` | notifications unredacted (titles, message previews); only under mandate |
 | `--storage` | pull shared storage (`/sdcard`: photos, videos, downloads, messaging media), without `Android/data` and `Android/obb` |
 | `--backup` | Android backup (`bu backup -all -noapk`) of the apps that allow it; confirm on the phone with an **empty** password |
@@ -58,7 +59,8 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
    the package manager log, shared-storage file listing, usage stats, logcat,
    bugreport.
 6. **Under `--mandate`**: SMS, MMS and their attachments, call log, contacts,
-   calendar, WhatsApp backups (`.crypt14` / `.crypt15`) from shared storage.
+   calendar, WhatsApp backups (`.crypt14` / `.crypt15`) and Signal backups
+   (`signal-*.backup`) from shared storage.
 7. **`--backup`, `--storage`** if asked.
 8. **Every third-party APK** (all splits) with its `dumpsys package`,
    including apps installed only in another user or profile.
@@ -80,7 +82,7 @@ methodology statement:
 - with `--backup`, `/data/local/tmp/apex_backup.ab`, pulled, deleted.
 
 Enabling developer options and USB debugging before the acquisition are your
-changes: note them for the procès-verbal.
+changes: declare them with `--phone-change`.
 
 ## Durations (Android 13, ~20 user apps)
 

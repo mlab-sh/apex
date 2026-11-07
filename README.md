@@ -158,6 +158,8 @@ apex comms ./case-42 -o ./case-42-comms                        # comms.csv + com
 | WhatsApp (messages, media paths, contact names) | no | `msgstore.db` (current and legacy schema), `wa.db` |
 | WhatsApp backups `.crypt14` / `.crypt15` | pulled from shared storage | decrypted with `files/key`, or the 64-digit key (`--wa-key`) |
 | Signal | no | `signal.db` (SQLCipher): secret from the app settings, or `--signal-key` |
+| Signal backups `signal-*.backup` | pulled from shared storage | decrypted with the 30-digit passphrase (`--signal-passphrase`) |
+| Any app, as displayed | `device capture`: text of every screen + screenshots | — |
 | Telegram | no | `cache4.db` (text located after the message date in the TL blob) |
 | Messenger, Instagram | no | `msys_database_*`, `threads_db2`, `direct.db` |
 | Snapchat | no | `arroyo.db` + `main.db` (text from protobuf, best effort) |
@@ -198,8 +200,18 @@ deleted before the seizure are not recovered (free pages stay encrypted).
 installed apps whose operator keeps data worth a legal request (ride-hailing,
 delivery, payment, wallets, encrypted messaging, social).
 
+**From an unlocked phone**, the cleanest route to an app's history is its own
+backup with the key it shows on screen: Signal's 30-digit passphrase, or
+WhatsApp's 64-digit end-to-end key. `device acquire --mandate` collects the
+backup files and `apex comms` decrypts them. For apps without a backup,
+`apex device capture --mandate <ref>` reads the conversation open on screen,
+scrolling to the oldest message: `transcript.txt`, `capture.db` and a hashed
+screenshot of every screen (Xiaomi needs *USB debugging (Security settings)*).
+Declare every change made to the phone with `--phone-change "HH:MM what"`: it
+goes in the manifest and the procès-verbal.
+
 Everything goes into the timeline. The HTML report only shows counts per kind;
-content is exported with `apex comms`.
+content is exported with `apex comms` (`comms.db` for SQL, CSV, JSON).
 
 ### Media, locations and hash sets
 

@@ -6,6 +6,7 @@ mod appdata;
 mod analyzers;
 mod artifacts;
 mod backup;
+mod capture;
 mod case;
 mod comms;
 mod cert_util;
@@ -25,6 +26,7 @@ mod scanner;
 mod sqlite_carve;
 mod search;
 mod seizure;
+mod signal_backup;
 mod stalkerware_iocs;
 mod tsa;
 mod util;
@@ -146,6 +148,9 @@ struct CommsArgs {
     /// WhatsApp 64-digit end-to-end backup key (hex), to decrypt .crypt15 backups without files/key
     #[arg(long = "wa-key")]
     wa_key: Option<String>,
+    /// Signal backup passphrase (the 30 digits shown when chat backups are turned on; spaces allowed)
+    #[arg(long = "signal-passphrase")]
+    signal_passphrase: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -296,6 +301,8 @@ enum DeviceAction {
     Scan(DeviceScanArgs),
     /// Run a raw ADB shell command on the device (power-user / debugging)
     Shell(DeviceShellArgs),
+    /// Capture the conversation open on screen: text of every screen (UI tree) + screenshots, scrolling to the oldest message
+    Capture(DeviceCaptureArgs),
 }
 
 #[derive(clap::Args)]
@@ -356,6 +363,9 @@ struct CaseMetaArgs {
     /// Seal (exhibit) number of this phone, e.g. "SCELLÉ N°3"
     #[arg(long)]
     seal: Option<String>,
+    /// A change the examiner made to the phone, with its time (repeatable), e.g. "10:42 USB debugging enabled"
+    #[arg(long = "phone-change")]
+    phone_changes: Vec<String>,
 }
 
 impl CaseMetaArgs {
@@ -366,8 +376,34 @@ impl CaseMetaArgs {
                 m.insert(k.into(), serde_json::json!(v));
             }
         }
+        if !self.phone_changes.is_empty() {
+            m.insert("phone_changes".into(), serde_json::json!(self.phone_changes));
+        }
         serde_json::Value::Object(m)
     }
+}
+
+#[derive(clap::Args)]
+struct DeviceCaptureArgs {
+    /// Legal mandate reference (required: a capture reads message content). Recorded in the manifest
+    #[arg(long, required = true)]
+    mandate: String,
+    /// Output directory (default: ./apex_capture)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+    /// What is captured, e.g. "WhatsApp — conversation with Dédé" (recorded in the manifest)
+    #[arg(long)]
+    label: Option<String>,
+    /// Stop after this many screens
+    #[arg(long = "max-pages", default_value_t = 300)]
+    max_pages: usize,
+    /// Milliseconds to wait after each swipe for the app to load older messages
+    #[arg(long = "settle-ms", default_value_t = 900)]
+    settle_ms: u64,
+    #[command(flatten)]
+    case: CaseMetaArgs,
+    #[command(flatten)]
+    conn: ConnArgs,
 }
 
 #[derive(clap::Args)]
@@ -546,6 +582,7 @@ fn main() -> ExitCode {
             DeviceAction::Acquire(a) => run_device_acquire(a),
             DeviceAction::Scan(a) => run_device_scan(a),
             DeviceAction::Shell(a) => run_device_shell(a),
+            DeviceAction::Capture(a) => run_device_capture(a),
         },
     }
 }
@@ -887,6 +924,15 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         }
     }
     if args.mandate.is_some() {
+        // Signal backups: wherever the user picked a folder on shared storage.
+        let found = phone.run("find /sdcard/ -maxdepth 6 -name 'signal-*.backup' 2>/dev/null").unwrap_or_default();
+        for remote in found.lines().map(str::trim).filter(|l| l.rsplit('/').next().is_some_and(appdata::is_signal_backup)) {
+            let name = remote.rsplit('/').next().unwrap_or_default();
+            let p = out.join(appdata::SIGNAL_BACKUPS).join(name);
+            if phone.pull(remote, &p).is_ok() {
+                collected.push(json!({"file": p.strip_prefix(&out).unwrap_or(&p).to_string_lossy(), "sha256": scanner::compute_hash(&p).unwrap_or_default(), "bytes": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "source_cmd": format!("pull {remote}")}));
+            }
+        }
         // WhatsApp backups sit on shared storage: readable without root, decryptable with the key.
         for dir in appdata::WA_BACKUP_LIVE {
             let ls = phone.run(&format!("ls -1 '{dir}' 2>/dev/null")).unwrap_or_default();
@@ -1025,6 +1071,49 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn run_device_capture(args: DeviceCaptureArgs) -> ExitCode {
+    let mut phone = match args.conn.connect() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+    let out = args.output.clone().unwrap_or_else(|| PathBuf::from("apex_capture"));
+    println!("\x1b[1mScreen capture\x1b[0m → {}  \x1b[2m(keep the phone unlocked; do not touch it until the end)\x1b[0m", out.display());
+    let opts = capture::Options { max_pages: args.max_pages, settle_ms: args.settle_ms, label: args.label.clone() };
+    let r = match capture::run(&mut phone, &out, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            return ExitCode::from(1);
+        }
+    };
+    let props = phone.props().unwrap_or_default();
+    let pick = |k: &str| props.get(k).cloned().unwrap_or_default();
+    let device = serde_json::json!({"model": pick("ro.product.model"), "manufacturer": pick("ro.product.manufacturer"), "serial": pick("ro.serialno"), "android": pick("ro.build.version.release")});
+    let mut meta = args.case.to_json();
+    meta["mandate"] = serde_json::json!(args.mandate);
+    meta["captured_app"] = serde_json::json!(r.package);
+    if let Some(l) = &args.label {
+        meta["capture_label"] = serde_json::json!(l);
+    }
+    match evidence::write_evidence(&out, &phone, "screen_capture", device, &r.reports, r.collected, meta) {
+        Ok((m, sha)) => {
+            println!("\x1b[32m✓ {} screen(s), {} line(s) of {}\x1b[0m", r.pages, r.lines, r.package);
+            for p in &r.reports {
+                println!("  {}", p.display());
+            }
+            println!("  manifest: {}  \x1b[2m(sha256 {})\x1b[0m", m.display(), &sha[..16]);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run_device_shell(args: DeviceShellArgs) -> ExitCode {
@@ -1563,7 +1652,7 @@ fn run_comms(args: CommsArgs) -> ExitCode {
         return ExitCode::from(1);
     }
     let c = case::Case::load(&args.case);
-    let (items, notes) = comms::load_with(&c, &appdata::Keys { signal: args.signal_key.clone(), whatsapp: args.wa_key.clone() });
+    let (items, notes) = comms::load_with(&c, &appdata::Keys { signal: args.signal_key.clone(), whatsapp: args.wa_key.clone(), signal_passphrase: args.signal_passphrase.clone() });
     for n in &notes {
         eprintln!("\x1b[33m  ⚠ {n}\x1b[0m");
     }
@@ -1582,6 +1671,11 @@ fn run_comms(args: CommsArgs) -> ExitCode {
         Ok(files) => {
             for f in files {
                 println!("\x1b[32m✓ {}\x1b[0m", f.display());
+            }
+            match appdata::export_signal_files(&args.case, args.signal_passphrase.as_deref(), &dir) {
+                Ok(f) if !f.is_empty() => println!("\x1b[32m✓ {} Signal attachment(s) → {}\x1b[0m", f.len(), dir.join("signal_files").display()),
+                Ok(_) => {}
+                Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
             }
             ExitCode::SUCCESS
         }

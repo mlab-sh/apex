@@ -141,6 +141,7 @@ fn exhibit(h: &mut String, n: usize, root: &Path, iocs: &IocSet) {
         Some("device_triage") => "Triage (état volatil et identifiants) par liaison ADB, sans root",
         Some("device_acquire") => "Acquisition logique par liaison ADB, sans root",
         Some("ffs_import") => "Exploitation d'une extraction complète du système de fichiers réalisée par ailleurs",
+        Some("screen_capture") => "Capture de l'écran d'une conversation (texte affiché relevé par l'arbre d'interface, copie d'écran de chaque page) par liaison ADB, sans root",
         Some(o) => o,
         None => "",
     };
@@ -155,9 +156,21 @@ fn exhibit(h: &mut String, n: usize, root: &Path, iocs: &IocSet) {
             ("Source", esc(s["source"].as_str().unwrap_or(""))),
             ("Commandes émises", if audit.is_empty() { String::new() } else { format!("{} (journal <code>audit.jsonl</code>, horodaté et haché)", audit.lines().count()) }),
             ("Réquisition / mandat", esc(manifest["case"]["mandate"].as_str().unwrap_or(""))),
+            ("Application capturée", esc(&[manifest["case"]["captured_app"].as_str(), manifest["case"]["capture_label"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" — "))),
             ("Outil", esc(&format!("APEX {}", manifest["tool"]["version"].as_str().unwrap_or("")))),
         ],
     );
+    let changes: Vec<&str> = manifest["case"]["phone_changes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+    h.push_str("<p><strong>Modifications apportées au téléphone par l'enquêteur :</strong> ");
+    if changes.is_empty() {
+        h.push_str("aucune déclarée (à compléter : activation des options pour les développeurs et du débogage USB, mode avion, sauvegardes…).</p>");
+    } else {
+        h.push_str("</p><ul>");
+        for c in changes {
+            let _ = write!(h, "<li>{}</li>", esc(c));
+        }
+        h.push_str("</ul>");
+    }
 
     h.push_str("<h3>Intégrité</h3>");
     let msha = std::fs::read_to_string(root.join("manifest.json.sha256")).unwrap_or_default();

@@ -21,6 +21,8 @@ needs a full file-system extraction made by a lab, read with
 | WhatsApp messages, media paths, contact names | no | `msgstore.db` (current and legacy schema), `wa.db` |
 | WhatsApp backups `.crypt14` / `.crypt15` | **files collected**, decrypted only with the 64-digit key | collected and decrypted with the keys in the extraction |
 | Signal | no | `signal.db` (SQLCipher), see keys below |
+| Signal backups `signal-*.backup` | **files collected**, decrypted with the 30-digit passphrase | collected from shared storage, same passphrase |
+| Any app, as displayed | [`device capture`](Device-Capture) (text of every screen + screenshots) | — |
 | Telegram | no | `cache4.db` |
 | Messenger | no | `msys_database_*`, `threads_db2` |
 | Instagram direct messages | no | `direct.db`, `msys_database_*` |
@@ -43,6 +45,7 @@ taken from protobuf strings and the source column says so.
 | WhatsApp `.crypt14` (local backup) | `files/key` | extraction only |
 | WhatsApp `.crypt15` (end-to-end backup) | `files/encrypted_backup.key`, or the 64-digit key | extraction, or `apex comms --wa-key <64 hex digits>` |
 | Signal `signal.db` | database secret | older Signal: in the app settings, read automatically; newer Signal: protected by the Android Keystore, recovered by the lab, given with `apex comms --signal-key <hex>` |
+| Signal `signal-*.backup` | 30-digit passphrase | shown once when chat backups are turned on: `apex comms --signal-passphrase "<digits>"` |
 
 The 64-digit WhatsApp key is shown **once**, when end-to-end backup is turned
 on with the "64-digit key" option. If the owner chose a password instead,
@@ -51,6 +54,42 @@ there is no displayable key and the backup needs the extraction's
 
 `comms` prints a ⚠ line for every source it found but could not open, with
 the reason.
+
+## Getting conversations from an unlocked phone
+
+Without root, ADB cannot read an app's private storage: no tool gets
+WhatsApp's or Signal's databases from a live phone that way. What an unlocked
+phone does allow, cleanest first:
+
+1. **The app's own backup, with a key the app shows on screen.** Complete
+   history, attachments, decrypted offline, and the app's real timestamps and
+   senders.
+   - **Signal**: Settings → Chats → Chat backups → turn on, pick a folder.
+     Signal shows a **30-digit passphrase**: write it down. Tap "Create
+     backup". Works offline. Then `device acquire --mandate …` collects the
+     `.backup` file and `apex comms --signal-passphrase "…"` decrypts it.
+   - **WhatsApp**: Settings → Chats → Chat backup → End-to-end encrypted
+     backup → turn on with **"Use 64-digit encryption key instead"**:
+     WhatsApp shows the key, write it down. Set "Back up to Google Account"
+     to **Never**, then "Back up". Turning on end-to-end backup **needs the
+     network** (WhatsApp registers the key with its servers). Then
+     `device acquire --mandate …` collects the `.crypt15` and
+     `apex comms --wa-key …` decrypts it.
+2. **The app's export of one conversation** (WhatsApp: conversation → ⋮ →
+   More → Export chat → without or with media → save to Downloads). A text
+   file and media; `device acquire --storage` collects them. Per conversation,
+   and the format has no message IDs.
+3. **[`device capture`](Device-Capture)**: what the app displays, screen by
+   screen, for apps without a backup or export (Telegram, Instagram,
+   Messenger, Snapchat…).
+
+Not offered by APEX: linking a new device (WhatsApp Web, Telegram Desktop)
+or the apps' "Download your information" requests. They pull data from the
+operator's servers, which is a different legal act: ask the magistrate, or
+send a request to the operator.
+
+Every setting changed for 1 and 2 is a change to the phone: record each one
+with `--phone-change "HH:MM what"` so it appears in the manifest and the PV.
 
 ## Deleted messages
 

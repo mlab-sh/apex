@@ -39,10 +39,11 @@ tool makes a full file-system extraction under legal authority, and
 | [`device dump`](Device) | Pull the third-party APKs only | yes |
 | [`device shell`](Device) | Run one raw shell command (debugging) | yes |
 | [`device acquire`](Device-Acquire) | Forensic acquisition into a case directory, triage mode, mandate mode | yes |
+| [`device capture`](Device-Capture) | Capture the conversation on screen: text of every screen, screenshots, transcript (under mandate) | yes |
 | [`import`](Import) | Turn a lab's full file-system extraction into an APEX case | no |
 | [`analyze`](Analyze) | Findings on a case or any directory of packages; STIX2 and hash sets | no |
 | [`identifiers`](Identifiers) | IMEI, IMSI, ICCID, line, MACs, accounts, operators to request | no |
-| [`comms`](Comms) | Export communications collected under mandate (CSV, JSON, KML) | no |
+| [`comms`](Comms) | Export communications collected under mandate (SQLite, CSV, JSON, KML), decrypt WhatsApp and Signal backups | no |
 | [`media`](Media) | Hash, EXIF / GPS, hash-set matching of shared storage | no |
 | [`search`](Search) | Keyword / regex search over a whole case, entity extraction | no |
 | [`timeline`](Timeline) | One chronological CSV / JSONL (Timesketch) | no |

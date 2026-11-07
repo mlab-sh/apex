@@ -12,6 +12,7 @@
 **On the phone**
 - [device listen / list / posture / scan / dump / shell](Device)
 - [device acquire](Device-Acquire)
+- [device capture](Device-Capture)
 
 **From an extraction**
 - [import](Import)

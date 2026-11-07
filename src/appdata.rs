@@ -41,6 +41,14 @@ pub const WA_BACKUP_LIVE: &[&str] = &[
     "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
 ];
 
+/// Signal backup file name: `signal-YYYY-MM-DD-HH-MM-SS.backup`.
+pub fn is_signal_backup(name: &str) -> bool {
+    name.starts_with("signal-") && name.ends_with(".backup") && !name.contains(char::is_whitespace) && !name.contains('/')
+}
+
+/// Where Signal backups go in a case.
+pub const SIGNAL_BACKUPS: &str = "comms/app/org.thoughtcrime.securesms/backups";
+
 pub fn is_wa_backup(name: &str) -> bool {
     name.starts_with("msgstore") && !name.contains(char::is_whitespace) && !name.contains('/') && (name.ends_with(".crypt14") || name.ends_with(".crypt15"))
 }
@@ -115,6 +123,9 @@ pub fn target(rel: &str, size: u64) -> Option<String> {
     if let Some(name) = WA_BACKUP_DIRS.iter().find_map(|d| r.strip_prefix(d)).filter(|n| is_wa_backup(n)) {
         let pkg = if r.contains("w4b") { "com.whatsapp.w4b" } else { "com.whatsapp" };
         return Some(format!("comms/app/{pkg}/backups/{name}"));
+    }
+    if let Some(name) = r.strip_prefix("data/media/0/").and_then(|x| x.rsplit('/').next()).filter(|n| is_signal_backup(n)) {
+        return Some(format!("{SIGNAL_BACKUPS}/{name}"));
     }
     let rest = r.strip_prefix("data/data/")?;
     let wanted = APP_PATHS.iter().any(|p| if p.ends_with('/') { r.starts_with(p) } else { r == *p })
@@ -698,6 +709,55 @@ pub struct Keys {
     pub signal: Option<String>,
     /// WhatsApp 64-digit end-to-end backup key (hex) or raw 32-byte key.
     pub whatsapp: Option<String>,
+    /// Signal backup passphrase (30 digits, shown when backups are turned on).
+    pub signal_passphrase: Option<String>,
+}
+
+/// Decrypt every Signal `.backup` of the case: (file name, database, decoded).
+fn signal_backups(app: &Path, pass: Option<&str>, notes: &mut Vec<String>) -> Vec<(String, Dbx, crate::signal_backup::Decoded)> {
+    let dir = app.join("org.thoughtcrime.securesms/backups");
+    let mut out = Vec::new();
+    for n in dbs(&dir, is_signal_backup) {
+        let Some(pass) = pass else {
+            notes.push(format!("Signal backup {n}: needs its 30-digit passphrase (`apex comms --signal-passphrase`)"));
+            continue;
+        };
+        let d = match std::fs::read(dir.join(&n)).map_err(|e| e.to_string()).and_then(|b| crate::signal_backup::decrypt(&b, pass)) {
+            Ok(d) => d,
+            Err(e) => {
+                notes.push(format!("Signal backup {n}: {e}"));
+                continue;
+            }
+        };
+        let Ok(tmp) = tempfile::tempdir() else { continue };
+        match crate::signal_backup::to_sqlite(&d, &tmp.path().join("s.db")) {
+            Ok(failed) if failed > 0 => notes.push(format!("Signal backup {n}: {failed} SQL statement(s) not replayed (internal or full-text tables)")),
+            Ok(_) => {}
+            Err(e) => {
+                notes.push(format!("Signal backup {n}: {e}"));
+                continue;
+            }
+        }
+        if let Some(db) = comms::open(tmp.path(), "s.db") {
+            out.push((n, db, d));
+        }
+    }
+    out
+}
+
+/// Write the files carried by Signal backups (attachments, avatars, stickers) into `dir`.
+pub fn export_signal_files(case_root: &Path, pass: Option<&str>, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut written = Vec::new();
+    for (n, _, d) in signal_backups(&case_root.join("comms/app"), pass, &mut Vec::new()) {
+        let base = dir.join("signal_files").join(n.trim_end_matches(".backup"));
+        for f in &d.files {
+            let p = base.join(f.kind).join(format!("{}.{}", f.id.replace(['/', '\\'], "_"), crate::signal_backup::ext(&f.data)));
+            std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&p, &f.data).map_err(|e| format!("{}: {e}", p.display()))?;
+            written.push(p);
+        }
+    }
+    Ok(written)
 }
 
 /// App-data records in `<case>/comms/app/`. `live_wa` (from msgstore.db)
@@ -710,12 +770,28 @@ pub fn load(comms_dir: &Path, keys: &Keys, live_wa: &[Comm], wa_names: &BTreeMap
         return (out, notes);
     }
     let sig = app.join("org.thoughtcrime.securesms/databases");
+    let mut live_sig: Vec<Comm> = Vec::new();
     if sig.join("signal.db").exists() {
         match keys.signal.clone().or_else(|| signal_secret(&app)).and_then(|k| sqlcipher_open(&sig, "signal.db", &k)) {
-            Some(d) => out.extend(signal(&d)),
+            Some(d) => live_sig = signal(&d),
             None => notes.push("Signal: database encrypted with a Keystore-protected secret; pass it with `apex comms --signal-key <hex>`".into()),
         }
     }
+    {
+        let live: HashSet<(i64, String)> = live_sig.iter().map(|c| (c.time_ms, c.text.clone())).collect();
+        let mut seen = HashSet::new();
+        for (n, db, _) in signal_backups(&app, keys.signal_passphrase.as_deref(), &mut notes) {
+            for mut c in signal(&db) {
+                if !seen.insert((c.time_ms, c.text.clone(), c.peer.clone())) || live.contains(&(c.time_ms, c.text.clone())) {
+                    continue;
+                }
+                c.recovered = !live_sig.is_empty();
+                c.source = format!("Signal backup {n}");
+                out.push(c);
+            }
+        }
+    }
+    out.extend(live_sig);
     for pkg in ["com.whatsapp", "com.whatsapp.w4b"] {
         let bk = app.join(pkg).join("backups");
         let names = dbs(&bk, is_wa_backup);
@@ -797,6 +873,7 @@ mod tests {
         assert_eq!(target("data/data/com.wallet.crypto.trustapp/cache/x", 10), None);
         assert_eq!(target("data/data/com.whatsapp/files/other", 10), None);
         assert!(target("data/user/0/com.whatsapp/files/encrypted_backup.key", 59).is_some());
+        assert_eq!(target("data/media/0/Signal/Backups/signal-2026-11-07-10-00-00.backup", 9).as_deref(), Some("comms/app/org.thoughtcrime.securesms/backups/signal-2026-11-07-10-00-00.backup"));
     }
 
     #[test]

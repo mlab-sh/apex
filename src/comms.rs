@@ -644,11 +644,46 @@ pub fn export(case: &Case, items: &[Comm], dir: &Path) -> Result<Vec<PathBuf>, S
         files.push((dir.join("locations.kml"), format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\"><Document>\n{pins}</Document></kml>\n")));
     }
     let mut out = Vec::new();
+    let db = dir.join("comms.db");
+    write_db(case, items, &db).map_err(|e| format!("{}: {e}", db.display()))?;
+    out.push(db);
     for (p, b) in files {
         std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()))?;
         out.push(p);
     }
     Ok(out)
+}
+
+/// `comms.db`: one table to query with SQL (`SELECT … FROM comms WHERE …`).
+fn write_db(case: &Case, items: &[Comm], path: &Path) -> rusqlite::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let c = rusqlite::Connection::open(path)?;
+    c.execute_batch(
+        "CREATE TABLE comms(
+           id INTEGER PRIMARY KEY,
+           time TEXT,              -- phone local time, ISO 8601 with UTC offset
+           time_ms INTEGER,        -- epoch milliseconds (0 = unknown)
+           kind TEXT,              -- sms, mms, call, contact, calendar, whatsapp, signal, telegram, messenger, instagram, snapchat, email, web, download, location, clipboard, keyboard, wallet
+           direction TEXT,         -- in, out, missed, … or ''
+           peer TEXT,
+           text TEXT,
+           extra TEXT,             -- duration, attachment, coordinates 'lat,lon', …
+           source TEXT,            -- database or file it comes from
+           recovered INTEGER       -- 1 = deleted record recovered
+         );
+         CREATE INDEX comms_time ON comms(time_ms);
+         CREATE INDEX comms_kind ON comms(kind);
+         CREATE INDEX comms_peer ON comms(peer);
+         BEGIN;",
+    )?;
+    {
+        let mut st = c.prepare("INSERT INTO comms(time, time_ms, kind, direction, peer, text, extra, source, recovered) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
+        for x in items {
+            let when = if x.time_ms > 0 { case.local_from_epoch_ms(x.time_ms).map(|t| case.iso(&t)) } else { None };
+            st.execute(rusqlite::params![when, x.time_ms, x.kind, x.direction, x.peer, x.text, x.extra, x.source, x.recovered as i64])?;
+        }
+    }
+    c.execute_batch("COMMIT")
 }
 
 /// Counts per kind (and recovered) for reports.

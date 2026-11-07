@@ -39,6 +39,8 @@ case-42/
     mms_parts/             MMS attachments
     db/                    SMS / call / contact / WhatsApp / Telegram / Chrome / calendar databases (extraction)
     app/<package>/…        app data: Signal, WhatsApp keys and backups, Maps, Meta, Snapchat, Gboard, Gmail, wallets
+    app/com.whatsapp/backups/            msgstore*.crypt14 / .crypt15 (live: from shared storage)
+    app/org.thoughtcrime.securesms/backups/   signal-*.backup (live: from shared storage)
   storage/                 only with --storage: shared storage
   backup/                  only with --backup: unpacked Android backup
 ```
@@ -46,6 +48,9 @@ case-42/
 A `--triage` case has the volatile and identity files only (no apps, no
 history). An imported case has the files the extraction allowed; `import`
 prints what was missing.
+
+A [`device capture`](Device-Capture) directory is separate: `pages/`,
+`transcript.txt`, `capture.db` and its own evidence bundle.
 
 Analysis outputs (`timeline.csv`, `report.html`, `_comms`, `_media`,
 `_search`) go next to the case by default or wherever `-o` says. Keep them
