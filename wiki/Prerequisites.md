@@ -20,6 +20,7 @@ running on the computer. See [Connecting a phone](Connecting-a-Phone).
 | `device shell` | recommended | no | — | terminal |
 | `device acquire` | **yes, for the whole run** | for `--mandate`, `--notification-content` | free disk space: ~1–2 GB, more with `--storage`; `--backup`: someone to confirm on the phone | case directory (`./apex_acquire` by default) |
 | `device acquire --triage` | yes | no | — | case directory, ≈ 10 s |
+| `device acquire --full` | yes, for 10–30 min | for communications | someone to confirm the backup on the phone; disk space for the shared storage and every APK | case directory with `system_hashes.txt` |
 | `device acquire --quick` | yes | as above | the [agent](Agent): Xiaomi needs *Install via USB* + *USB debugging (Security settings)* | case directory, ≈ 40–60 s |
 | `device capture` | **yes**, conversation open on screen | **required** | simulated touches allowed (Xiaomi: *USB debugging (Security settings)*); nobody touches the phone | capture directory (`./apex_capture`): screenshots, `transcript.txt`, `capture.db` |
 
@@ -31,6 +32,7 @@ No phone, no network (except `seal`).
 |---|---|---|---|
 | `import` | extraction: directory, `.zip`, `.tar`, `.tar.gz` | must contain `data/system/packages.xml`; app data needs an **after-first-unlock** extraction; `--mandate` to copy communications and app data, `--storage` for `data/media/0` | case directory (`-o` required) |
 | `analyze` | case, any directory of packages, or one package | — | terminal; `--json -o`; `--evidence <dir>` |
+| `export` | case | — | the directory given to `-o` (`export_manifest.json`) |
 | `db` | case (+ capture directories) | — (agent tables filled only if the agent ran) | `<case>.db` |
 | `identifiers` | case | best with a full or triage acquisition (telephony identifiers come from `iphonesubinfo`) | terminal; `--json -o` |
 | `comms` | case | acquired or imported **with `--mandate`**; keys for Signal / WhatsApp backups, see [Communications and app data](Communications-and-App-Data#keys) | `<case>_comms/`: `comms.db`, `comms.csv`, `comms.json`, `locations.kml`, `signal_files/` |

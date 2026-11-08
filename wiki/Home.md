@@ -44,6 +44,7 @@ tool makes a full file-system extraction under legal authority, and
 | [`device capture`](Device-Capture) | Capture the conversation on screen: text of every screen, screenshots, transcript (under mandate) | yes |
 | [`import`](Import) | Turn a lab's full file-system extraction into an APEX case | no |
 | [`db`](Db) | One SQLite database with everything in a case, for SQL queries | no |
+| [`export`](Export) | Lay a case out like a file-system extraction, for other tools | no |
 | [`link`](Link) | What several exhibits have in common: numbers, accounts, wallets, Wi-Fi, apps | no |
 | [`analyze`](Analyze) | Findings on a case or any directory of packages; STIX2 and hash sets | no |
 | [`identifiers`](Identifiers) | IMEI, IMSI, ICCID, line, MACs, accounts, operators to request | no |

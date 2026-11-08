@@ -11,29 +11,19 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const REMOTE: &str = "/data/local/tmp/apex_backup.ab";
-
 /// Run the backup on the phone and pull it to `<out>/device/backup.ab`.
 pub fn run(phone: &mut crate::device::Phone, out: &Path) -> Result<PathBuf, String> {
-    phone.run(&format!("rm -f {REMOTE}; (bu backup -all -noapk > {REMOTE} 2>/dev/null &)"))?;
-    eprintln!("\x1b[33m  On the phone: unlock it, tap \"Back up my data\" and leave the password EMPTY (an encrypted backup cannot be read).\x1b[0m");
-    let started = std::time::Instant::now();
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        let running = phone.run("pidof bu").map(|o| !o.trim().is_empty()).unwrap_or(false);
-        if !running {
-            break;
-        }
-        if started.elapsed().as_secs() > 900 {
-            let _ = phone.run("kill $(pidof bu)");
-            return Err("backup not confirmed or not finished after 15 min".into());
-        }
-    }
+    eprintln!("\x1b[33m  On the phone: unlock it, tap \"Back up my data\" within ONE MINUTE and leave the password EMPTY (an encrypted backup cannot be read).\x1b[0m");
+    // In the foreground: a background job does not survive the end of the ADB
+    // shell session. Android gives up by itself if nobody confirms within a
+    // minute; `timeout` bounds a very long backup.
+    phone.run(&format!("rm -f {REMOTE}; timeout 900 bu backup -all -noapk > {REMOTE} 2>/dev/null"))?;
     let local = out.join("device/backup.ab");
     let res = phone.pull(REMOTE, &local);
     let _ = phone.run(&format!("rm -f {REMOTE}"));
     res?;
     if std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0) < 24 {
-        return Err("empty backup (refused on the phone, or no app allows backup)".into());
+        return Err("empty backup (not confirmed on the phone within the minute, refused, or no app allows backup)".into());
     }
     Ok(local)
 }

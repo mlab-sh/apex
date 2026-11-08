@@ -39,6 +39,7 @@ apex device acquire --no-bugreport --no-logcat --no-usagestats -o ./case-42   # 
 | `--backup` | Android backup (`bu backup -all -noapk`) of the apps that allow it; confirm on the phone with an **empty** password |
 | `--quick` | **shortest time plugged in**: APKs hashed on the phone (`sha256sum`) instead of pulled, **except the apps worth a static analysis**, which are pulled: not installed from a store, without a launcher icon, or holding accessibility, device admin or notification access. No bugreport, logcat or usage-stats dump (the [agent](Agent) gives usage events and signing certificates). ≈ 40–60 s |
 | `--no-agent` | do not install the [APEX agent](Agent) |
+| `--full` | **everything a phone gives without root**: `--storage`, `--backup`, every APK, bugreport, logcat, usage stats, the agent, and the **SHA-256 of every file of the system partitions** (`/system`, `/system_ext`, `/product`, `/vendor`, `/odm`). 10–30 min. Add `--mandate` for communications. Confirm the backup on the phone |
 | `--package <PKG>` | acquire only this app (device state is still collected) |
 | `--no-bugreport` | skip the bugreport (1–5 min, 10–100 MB); loses battery history and some install history |
 | `--no-logcat`, `--no-usagestats`, `--no-screenshot` | skip those artifacts |
@@ -97,6 +98,7 @@ changes: declare them with `--phone-change`.
 |---|---|
 | `--triage` | ≈ 6–10 s |
 | `--quick` (agent included) | ≈ 40–60 s |
+| `--full` | 10–30 min (storage size, backup confirmation) |
 | full, `--no-bugreport` | ≈ 1–5 min (APK count and size) |
 | full | + 1–5 min for the bugreport |
 | `--storage` | + ≈ 1 min per few hundred MB |
@@ -107,6 +109,17 @@ App-private data (`/data/data`: WhatsApp, Signal, Telegram databases…) is not
 readable without root. It comes from a lab extraction through
 [`apex import`](Import). See [Communications and app data](Communications-and-App-Data)
 for what is reachable live and what needs an extraction.
+
+## With `--full`
+
+The dump to keep and work on, once the phone has gone back or to the lab:
+everything readable without root, in one run. Besides the usual
+acquisition, `device/system_hashes.txt` lists the SHA-256 of every readable
+file of the system partitions: [`apex diff`](Diff) between two `--full`
+acquisitions shows any system file added, removed or changed (a firmware
+update changes many; a handful without an update is suspicious).
+[`apex export`](Export) then lays the case out like a file-system
+extraction for other tools.
 
 ## With `--quick`
 

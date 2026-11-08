@@ -72,6 +72,11 @@ contacts, SIMs and media. Unplug, and do the rest at the office.
 stay plugged in: also the APKs themselves (static analysis) and the bugreport
 (battery and install history).
 
+**Everything, to work on the dump afterwards (10–30 min):** `--full` adds the
+whole shared storage, the Android backup (confirm it on the phone) and the
+SHA-256 of every system file. Then `apex export` gives the same dump with the
+layout of a lab extraction.
+
 Without a mandate, APEX collects the phone's state, apps and history, but no
 communication content (see [Legal scope](Legal-Scope)):
 

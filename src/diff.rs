@@ -55,6 +55,21 @@ fn set_diff<T: Ord + Clone + serde::Serialize>(a: &BTreeSet<T>, b: &BTreeSet<T>)
     })
 }
 
+/// `sha256sum` output of `device acquire --full` → path → hash.
+fn system_hashes(c: &Case) -> Option<BTreeMap<String, String>> {
+    let t = std::fs::read_to_string(c.root.join("device/system_hashes.txt")).ok()?;
+    Some(t.lines().filter_map(|l| l.split_once("  ").map(|(h, p)| (p.trim().to_string(), h.trim().to_string()))).filter(|(_, h)| h.len() == 64).collect())
+}
+
+/// System files added, removed or changed between two `--full` acquisitions.
+pub fn system_files(old: &Case, new: &Case) -> Value {
+    let (Some(a), Some(b)) = (system_hashes(old), system_hashes(new)) else { return Value::Null };
+    let changed: Vec<&String> = a.iter().filter(|(p, h)| b.get(*p).is_some_and(|h2| h2 != *h)).map(|(p, _)| p).collect();
+    let added: Vec<&String> = b.keys().filter(|p| !a.contains_key(*p)).collect();
+    let removed: Vec<&String> = a.keys().filter(|p| !b.contains_key(*p)).collect();
+    json!({"files_old": a.len(), "files_new": b.len(), "changed": changed, "added": added, "removed": removed})
+}
+
 pub fn diff(old: &Case, new: &Case, iocs: &IocSet) -> Value {
     // Device identity: a different serial means these are not the same phone.
     let ids = |c: &Case| serde_json::from_str::<Value>(&read(c, "device/identifiers.json")).unwrap_or(Value::Null);
@@ -134,6 +149,7 @@ pub fn diff(old: &Case, new: &Case, iocs: &IocSet) -> Value {
         "settings": settings,
         "findings": set_diff(&fa, &fb),
         "artifacts": set_diff(&files(old), &files(new)),
+        "system_files": system_files(old, new),
     })
 }
 
@@ -187,6 +203,21 @@ pub fn print(d: &Value) {
         }
     }
     section("Findings", &d["findings"], &mut any);
+    let sf = &d["system_files"];
+    if sf.is_object() {
+        let n = |k: &str| sf[k].as_array().map(|a| a.len()).unwrap_or(0);
+        if n("changed") + n("added") + n("removed") == 0 {
+            println!("\n{g}System partitions: {} files, all identical.{z}", sf["files_new"]);
+        } else {
+            any = true;
+            println!("\n{b}System partitions{z}  {y}~{} changed, +{} added, -{} removed{z}  (an OTA update changes many; a handful of changed files without an update is suspicious)", n("changed"), n("added"), n("removed"));
+            for k in ["changed", "added", "removed"] {
+                for p in sf[k].as_array().into_iter().flatten().take(15) {
+                    println!("  {y}{} {}{z}", match k { "changed" => "~", "added" => "+", _ => "-" }, p.as_str().unwrap_or(""));
+                }
+            }
+        }
+    }
     let only = |k: &str| d["artifacts"][k].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     for (k, which) in [("removed", "old"), ("added", "new")] {
         if !only(k).is_empty() {

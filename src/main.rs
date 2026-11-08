@@ -17,6 +17,7 @@ mod device;
 mod diff;
 mod elf_util;
 mod evidence;
+mod export;
 mod history;
 mod import;
 mod ioc;
@@ -89,6 +90,8 @@ enum Command {
     Pv(PvArgs),
     /// What several exhibits have in common: numbers, e-mails, accounts, wallets, IBANs, Wi-Fi networks, Bluetooth devices, sideloaded apps
     Link(LinkArgs),
+    /// Lay a case out like a file-system extraction (data/media/0, data/app, data/data…) for other tools
+    Export(ExportArgs),
     /// One SQLite database with everything in a case (packages, findings, timeline, usage, comms, contacts, media, entities, captures)
     Db(DbArgs),
 }
@@ -222,6 +225,15 @@ struct DiffArgs {
     /// JSON output file
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct ExportArgs {
+    /// Case directory
+    case: PathBuf,
+    /// Output directory (created)
+    #[arg(short = 'o', long = "output", required = true)]
+    output: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -508,8 +520,11 @@ struct DeviceAcquireArgs {
     #[arg(long = "no-agent")]
     no_agent: bool,
     /// Shortest time plugged in: APKs hashed on the phone instead of pulled, no bugreport, logcat or usage-stats dump (the agent gives usage events)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "full")]
     quick: bool,
+    /// Everything a phone gives without root: --storage, --backup, every APK, bugreport, and the SHA-256 of every file of the system partitions (10-30 min). Add --mandate for communications
+    #[arg(long, conflicts_with = "triage")]
+    full: bool,
     #[command(flatten)]
     conn: ConnArgs,
 }
@@ -619,6 +634,7 @@ fn main() -> ExitCode {
         Command::Pv(args) => run_pv(args),
         Command::Db(args) => run_db(args),
         Command::Link(args) => run_link(args),
+        Command::Export(args) => run_export(args),
         Command::Device(args) => match args.action {
             DeviceAction::Listen(a) => run_device_listen(a),
             DeviceAction::List(a) => run_device_list(a),
@@ -826,8 +842,16 @@ fn acquire_save(
     }
 }
 
-fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
+fn run_device_acquire(mut args: DeviceAcquireArgs) -> ExitCode {
     use serde_json::json;
+    if args.full {
+        args.storage = true;
+        args.backup = true;
+        if args.mandate.is_none() {
+            eprintln!("\x1b[33m--full without --mandate: no communications, contacts or message backups are collected.\x1b[0m");
+        }
+        eprintln!("\x1b[33m--full: confirm the Android backup on the phone when asked (empty password); keep it unlocked and plugged in (10-30 min).\x1b[0m");
+    }
 
     let mut phone = match args.conn.connect() {
         Ok(p) => p,
@@ -1046,6 +1070,18 @@ fn run_device_acquire(args: DeviceAcquireArgs) -> ExitCode {
         if let Err(e) = phone.bugreport(&device_dir.join("bugreport.zip")) {
             eprintln!("\x1b[33m[warn] bugreport: {e}\x1b[0m");
         }
+    }
+    if args.full {
+        // Fingerprint of the firmware as it is: compare two acquisitions (`apex diff`)
+        // or a factory image to prove system files were not altered.
+        println!("\x1b[2m  SHA-256 of the system partitions (1-3 min)…\x1b[0m");
+        acquire_save(
+            &mut phone,
+            "find /system /system_ext /product /vendor /odm -xdev -type f 2>/dev/null | xargs sha256sum 2>/dev/null",
+            &device_dir.join("system_hashes.txt"),
+            &out,
+            &mut collected,
+        );
     }
     }
 
@@ -1755,6 +1791,28 @@ fn run_diff(args: DiffArgs) -> ExitCode {
 }
 
 /// `<case>_<suffix>` next to the case directory.
+fn run_export(args: ExportArgs) -> ExitCode {
+    if !case::Case::is_case(&args.case) {
+        eprintln!("\x1b[31m{} is not an APEX case\x1b[0m", args.case.display());
+        return ExitCode::from(1);
+    }
+    match export::export(&case::Case::load(&args.case), &args.output) {
+        Ok(s) => {
+            println!(
+                "\x1b[32m✓ {} file(s), {:.1} MB → {}\x1b[0m  \x1b[2m(copies, every hash checked; export_manifest.json)\x1b[0m",
+                s.files,
+                s.bytes as f64 / 1_048_576.0,
+                args.output.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_link(args: LinkArgs) -> ExitCode {
     for c in &args.cases {
         if !case::Case::is_case(c) {

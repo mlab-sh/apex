@@ -40,3 +40,6 @@ apex diff ./case-42 ./case-57 --json -o diff.json
   private DNS, proxy, always-on VPN, keyboard.
 - Findings that appeared (`+`) or disappeared (`-`).
 - Artifacts present in only one of the two cases.
+- With two `--full` acquisitions: **system files** added, removed or changed
+  (SHA-256 of every readable file of `/system`, `/system_ext`, `/product`,
+  `/vendor`, `/odm`).
