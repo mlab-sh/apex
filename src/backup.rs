@@ -34,6 +34,11 @@ pub fn data_path(tar_path: &str) -> Option<String> {
     let rest = tar_path.strip_prefix("apps/")?;
     let (pkg, rest) = rest.split_once('/')?;
     let (domain, file) = rest.split_once('/').unwrap_or((rest, ""));
+    // d_* domains are device-protected storage (data/user_de/0/<pkg>/…).
+    let (root, domain) = match domain.strip_prefix("d_") {
+        Some(d) => ("data/user_de/0", d),
+        None => ("data/data", domain),
+    };
     let dir = match domain {
         "db" => "databases",
         "f" => "files",
@@ -42,7 +47,7 @@ pub fn data_path(tar_path: &str) -> Option<String> {
         "r" => "",
         _ => return None,
     };
-    Some(if dir.is_empty() { format!("data/data/{pkg}/{file}") } else { format!("data/data/{pkg}/{dir}/{file}") })
+    Some(if dir.is_empty() { format!("{root}/{pkg}/{file}") } else { format!("{root}/{pkg}/{dir}/{file}") })
 }
 
 /// Unpack `ab` into `<out>/backup/`; with `mandate`, copy communication

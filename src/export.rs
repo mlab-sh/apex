@@ -107,6 +107,7 @@ mod tests {
         assert_eq!(target("comms/app/com.whatsapp/backups/msgstore.db.crypt15").as_deref(), Some("data/media/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15"));
         assert_eq!(target("comms/app/org.thoughtcrime.securesms/databases/signal.db").as_deref(), Some("data/data/org.thoughtcrime.securesms/databases/signal.db"));
         assert_eq!(target("backup/apps/com.y/db/x.db").as_deref(), Some("data/data/com.y/databases/x.db"));
+        assert_eq!(target("backup/apps/com.android.providers.telephony/d_f/000000_sms_backup").as_deref(), Some("data/user_de/0/com.android.providers.telephony/files/000000_sms_backup"));
         assert_eq!(target("device/getprop.txt"), None);
     }
 }
